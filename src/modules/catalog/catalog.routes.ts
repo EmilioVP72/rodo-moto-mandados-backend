@@ -1,7 +1,8 @@
 import { FastifyInstance } from 'fastify';
 import { prisma } from '../../infra/prisma.js';
 import { getCache, setCache, invalidateCache } from '../../infra/redis.js';
-import { broadcastEvent } from '../../infra/socket.js';
+import { broadcastEvent, emitAdminEvent } from '../../infra/socket.js';
+import { requireAdmin } from '../../middlewares/auth.js';
 
 const RESTAURANTS_CACHE_KEY = 'rodo:catalog:restaurants';
 const PARTNER_LOCALS_CACHE_KEY = 'rodo:catalog:partner_locals';
@@ -34,7 +35,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(list);
   });
 
-  app.put('/api/restaurants/:id', async (request, reply) => {
+  app.put('/api/restaurants/:id', { preHandler: [requireAdmin] }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = request.body as any;
     if (!body || !body.name) {
@@ -76,7 +77,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(restaurantPayload);
   });
 
-  app.delete('/api/restaurants/:id', async (request, reply) => {
+  app.delete('/api/restaurants/:id', { preHandler: [requireAdmin] }, async (request, reply) => {
     const { id } = request.params as { id: string };
     await prisma.restaurant.deleteMany({ where: { id } });
     await invalidateCache(RESTAURANTS_CACHE_KEY);
@@ -136,7 +137,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
-  app.put('/api/partner-locals/:id', async (request, reply) => {
+  app.put('/api/partner-locals/:id', { preHandler: [requireAdmin] }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = request.body as any;
     if (!body || !body.name || !body.code) {
@@ -182,15 +183,15 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     });
 
     await invalidateCache(PARTNER_LOCALS_CACHE_KEY);
-    broadcastEvent('partner-locals:updated', saved);
+    emitAdminEvent('partner-locals:updated', saved);
     return reply.send(saved);
   });
 
-  app.delete('/api/partner-locals/:id', async (request, reply) => {
+  app.delete('/api/partner-locals/:id', { preHandler: [requireAdmin] }, async (request, reply) => {
     const { id } = request.params as { id: string };
     await prisma.partnerLocal.deleteMany({ where: { id } });
     await invalidateCache(PARTNER_LOCALS_CACHE_KEY);
-    broadcastEvent('partner-locals:deleted', { id });
+    emitAdminEvent('partner-locals:deleted', { id });
     return reply.send({ ok: true, id });
   });
 }

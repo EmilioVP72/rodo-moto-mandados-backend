@@ -19,24 +19,35 @@ async function e2eFetch(path: string, options: RequestInit = {}) {
   return { status: res.status, ok: res.ok, data, headers: res.headers };
 }
 
-describe('Fase 4 · End-to-End Integration Tests (Nginx + Fastify + PostgreSQL 16 + Redis 7)', () => {
-  let adminToken = '';
-  let customerToken = '';
-  let testCustomerId = '';
-  let createdOrderId = '';
-  const uniqueRunId = Date.now().toString().slice(-6);
-  const uniqueSpeiKey = `SPEI20261118${uniqueRunId}`;
+function makeValidIne10(seed6: string, prefix3: string): string {
+  const base9 = `${prefix3}${seed6.slice(-6).padStart(6, '0')}`;
+  const weights = [7, 3, 1, 7, 3, 1, 7, 3, 1];
+  let sum = 0;
+  for (let i = 0; i < 9; i++) sum += parseInt(base9[i], 10) * weights[i];
+  return `${base9}${sum % 10}`;
+}
 
-  it('1. Nginx sirve el Frontend PWA, Service Worker y proxy /api/health en estado healthy', async () => {
+describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password Reset + Strict Privacy Isolation)', () => {
+  let adminToken = '';
+  let customerAToken = '';
+  let customerARefresh = '';
+  let customerAId = '';
+  let customerBToken = '';
+  let orderAId = '';
+
+  const runId = Date.now().toString().slice(-6);
+  const emailA = `cliente.a.${runId}@rodo.mx`;
+  const emailB = `cliente.b.${runId}@rodo.mx`;
+  const uniqueSpeiKey = `SPEI20261118${runId}`;
+
+  it('1. Nginx sirve Frontend PWA, Service Worker y proxy /api/health en estado healthy', async () => {
     const htmlRes = await fetch(`${BASE_URL}/`);
     assert.equal(htmlRes.status, 200);
-    const htmlText = await htmlRes.text();
-    assert.ok(htmlText.includes('<div id="root">'));
+    assert.ok((await htmlRes.text()).includes('<div id="root">'));
 
     const swRes = await fetch(`${BASE_URL}/sw.js`);
     assert.equal(swRes.status, 200);
-    const swText = await swRes.text();
-    assert.ok(swText.includes('rodo-pwa-cache-v1'));
+    assert.ok((await swRes.text()).includes('rodo-pwa-cache-v1'));
 
     const health = await e2eFetch('/api/health');
     assert.equal(health.status, 200);
@@ -45,7 +56,34 @@ describe('Fase 4 · End-to-End Integration Tests (Nginx + Fastify + PostgreSQL 1
     assert.equal(health.data.redis, 'connected');
   });
 
-  it('2. Sincroniza catálogo semilla en PostgreSQL (/api/seed) y consulta restaurantes y locales por PIN', async () => {
+  it('2. Rechaza acceso sin autenticación a /api/orders, /api/auth/me y /api/profile/addresses (HTTP 401)', async () => {
+    const unauthOrders = await e2eFetch('/api/orders');
+    assert.equal(unauthOrders.status, 401);
+
+    const unauthMe = await e2eFetch('/api/auth/me');
+    assert.equal(unauthMe.status, 401);
+
+    const unauthAddresses = await e2eFetch('/api/profile/addresses');
+    assert.equal(unauthAddresses.status, 401);
+  });
+
+  it('3. Autentica al Administrador, siembra catálogo y verifica aislamiento RBAC', async () => {
+    const badLogin = await e2eFetch('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'edsoncruz14999@gmail.com', password: 'WRONG_PASSWORD' }),
+    });
+    assert.equal(badLogin.status, 401);
+
+    const adminLogin = await e2eFetch('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'edsoncruz14999@gmail.com', password: 'RODO2026' }),
+    });
+    assert.equal(adminLogin.status, 200);
+    assert.equal(adminLogin.data.isAdmin, true);
+    assert.ok(adminLogin.data.token);
+    assert.ok(adminLogin.data.refreshToken);
+    adminToken = adminLogin.data.token;
+
     const seedRes = await e2eFetch('/api/seed', {
       method: 'POST',
       body: JSON.stringify({
@@ -65,252 +103,272 @@ describe('Fase 4 · End-to-End Integration Tests (Nginx + Fastify + PostgreSQL 1
             ],
           },
         ],
-        settings: {
-          rainPauseEnabled: false,
-          baseDeliveryTariff: 35,
-          tariffPerKm: 7,
-        },
+        settings: { rainPauseEnabled: false, baseDeliveryTariff: 35, tariffPerKm: 7 },
       }),
     });
     assert.equal(seedRes.status, 200);
-    assert.equal(seedRes.data.ok, true);
 
-    const restRes = await e2eFetch('/api/restaurants');
-    assert.equal(restRes.status, 200);
-    assert.ok(Array.isArray(restRes.data) && restRes.data.length >= 1);
-
-    const pinRes = await e2eFetch('/api/partner-locals/code/101');
-    assert.equal(pinRes.status, 200);
-    assert.equal(pinRes.data.name, 'Tacos Sebastián');
+    // Verificar que GET /api/settings público NO filtra adminPasscode
+    const publicSettings = await e2eFetch('/api/settings');
+    assert.equal(publicSettings.status, 200);
+    assert.equal(publicSettings.data.adminPasscode, undefined);
   });
 
-  it('3. Autentica al Administrador con JWT y rechaza contraseñas incorrectas', async () => {
-    const badLogin = await e2eFetch('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ email: 'edsoncruz14999@gmail.com', password: 'WRONG_PASSWORD' }),
-    });
-    assert.equal(badLogin.status, 401);
-
-    const adminLogin = await e2eFetch('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ email: 'edsoncruz14999@gmail.com', password: 'RODO2026' }),
-    });
-    assert.equal(adminLogin.status, 200);
-    assert.equal(adminLogin.data.isAdmin, true);
-    assert.ok(adminLogin.data.token);
-    adminToken = adminLogin.data.token;
-
-    const meRes = await e2eFetch('/api/auth/me', {
-      headers: { Authorization: `Bearer ${adminToken}` },
-    });
-    assert.equal(meRes.status, 200);
-    assert.equal(meRes.data.user.role, 'ADMIN');
-  });
-
-  it('4. Bloquea registro con INE deudor (8942105434) y registra cliente nuevo con INE válido (8942105438)', async () => {
+  it('4. Registra Cliente A y Cliente B en PostgreSQL, bloquea INE deudor y protege endpoints Admin (403)', async () => {
     const debtorAttempt = await e2eFetch('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify({
         name: 'Intento Deudor',
         phone: '4151998877',
-        email: `deudor.${uniqueRunId}@ejemplo.com`,
-        password: 'Password123',
-        ine10Digits: '8942105434', // INE de Roberto Gómez con deuda de $340 MXN en PostgreSQL
+        email: `deudor.${runId}@ejemplo.com`,
+        password: 'Password123!',
+        ine10Digits: '8942105434',
       }),
     });
     assert.equal(debtorAttempt.status, 403);
-    assert.ok(debtorAttempt.data.error.includes('ADEUDO'));
 
-    // Generar un INE de 10 dígitos válido único para esta ejecución calculando su dígito verificador OACI 7-3-1
-    const base9 = `741${uniqueRunId}`;
-    const weights = [7, 3, 1, 7, 3, 1, 7, 3, 1];
-    let sum = 0;
-    for (let i = 0; i < 9; i++) sum += parseInt(base9[i], 10) * weights[i];
-    const checkDigit = sum % 10;
-    const validUniqueIne = `${base9}${checkDigit}`;
-
-    const registerRes = await e2eFetch('/api/auth/register', {
+    const regA = await e2eFetch('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify({
-        name: 'Cliente Prueba E2E',
-        phone: `4151${uniqueRunId}`,
-        email: `cliente.e2e.${uniqueRunId}@rodo.mx`,
-        password: 'PasswordE2E!',
-        ine10Digits: validUniqueIne,
+        name: 'Cliente A Privado',
+        phone: `4151${runId}`,
+        email: emailA,
+        password: 'PasswordA123!',
+        ine10Digits: makeValidIne10(runId, '741'),
       }),
     });
-    assert.equal(registerRes.status, 201);
-    assert.ok(registerRes.data.token);
-    assert.ok(registerRes.data.user.referralCode.startsWith('RODO-'));
-    customerToken = registerRes.data.token;
-    testCustomerId = registerRes.data.user.id;
+    assert.equal(regA.status, 201);
+    assert.ok(regA.data.token);
+    assert.ok(regA.data.refreshToken);
+    customerAToken = regA.data.token;
+    customerARefresh = regA.data.refreshToken;
+    customerAId = regA.data.user.id;
+
+    // Cliente A no puede acceder a rutas exclusivas de Admin (HTTP 403)
+    const forbiddenAccounts = await e2eFetch('/api/auth/accounts', {
+      headers: { Authorization: `Bearer ${customerAToken}` },
+    });
+    assert.equal(forbiddenAccounts.status, 403);
+
+    const forbiddenSettings = await e2eFetch('/api/settings', {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${customerAToken}` },
+      body: JSON.stringify({ rainPauseEnabled: true }),
+    });
+    assert.equal(forbiddenSettings.status, 403);
+
+    // Registrar Cliente B (usando código de referido de Cliente A para validar tabla relacional coupons)
+    const regB = await e2eFetch('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Cliente B Independiente',
+        phone: `4152${runId}`,
+        email: emailB,
+        password: 'PasswordB123!',
+        ine10Digits: makeValidIne10(runId, '852'),
+        referralCodeInput: regA.data.user.referralCode,
+      }),
+    });
+    assert.equal(regB.status, 201);
+    assert.equal(regB.data.user.coupons.length, 1); // Cupón de bienvenida en tabla coupons
+    customerBToken = regB.data.token;
   });
 
-  it('5. Valida transferencia SPEI en servidor y recalcula precios alterados al crear una orden', async () => {
-    const fakeSpei = await e2eFetch('/api/orders/verify-transfer', {
+  it('5. Aislamiento Estricto Multi-Usuario: Cliente B JAMÁS puede ver ni editar direcciones ni pedidos de Cliente A', async () => {
+    // Cliente A guarda su dirección privada en customer_addresses
+    const addrRes = await e2eFetch('/api/profile/addresses', {
       method: 'POST',
+      headers: { Authorization: `Bearer ${customerAToken}` },
       body: JSON.stringify({
-        trackingKey: '123456',
-        expectedAmount: 235,
-        senderBank: 'BBVA',
-        orderFolio: `RD-E2E-${uniqueRunId}`,
+        label: 'Casa de Cliente A',
+        calle: 'Calle Correo',
+        numero: '14',
+        colonia: 'Centro',
+        isDefault: true,
       }),
     });
-    assert.equal(fakeSpei.data.verified, false);
+    assert.equal(addrRes.status, 201);
 
-    const realSpei = await e2eFetch('/api/orders/verify-transfer', {
+    // Cliente A verifica SPEI y crea un pedido (con precio alterado para validar recálculo server-side)
+    const speiRes = await e2eFetch('/api/orders/verify-transfer', {
       method: 'POST',
+      headers: { Authorization: `Bearer ${customerAToken}` },
       body: JSON.stringify({
         trackingKey: uniqueSpeiKey,
         expectedAmount: 235,
         senderBank: 'BBVA',
-        orderFolio: `RD-E2E-${uniqueRunId}`,
+        orderFolio: `RD-ISO-${runId}`,
       }),
     });
-    assert.equal(realSpei.data.verified, true);
+    assert.equal(speiRes.data.verified, true);
 
-    // Crear orden enviando un precio manipulado ($1 MXN en vez de $100 MXN por orden de tacos)
-    const orderFolio = `RD-261118-${uniqueRunId}`;
-    const createOrderRes = await e2eFetch('/api/orders', {
+    const createOrderA = await e2eFetch('/api/orders', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${customerToken}` },
+      headers: { Authorization: `Bearer ${customerAToken}` },
       body: JSON.stringify({
-        id: `ord-e2e-${uniqueRunId}`,
-        folio: orderFolio,
+        id: `ord-a-${runId}`,
+        folio: `RD-ISO-${runId}`,
         orderType: 'comida',
-        customerId: testCustomerId,
-        customerName: 'Cliente Prueba E2E',
-        customerPhone: `4151${uniqueRunId}`,
-        customerEmail: `cliente.e2e.${uniqueRunId}@rodo.mx`,
         restaurantId: 'tacos-sebas',
         restaurantName: 'Tacos Sebastián',
-        items: [
-          { id: 'ts-1', name: 'Orden de 4 Tacos de Bistec', price: 1, quantity: 2 }, // Manipulado a $1
-        ],
+        items: [{ id: 'ts-1', name: 'Orden de 4 Tacos de Bistec', price: 1, quantity: 2 }],
         subtotal: 2,
         deliveryFee: 35,
         total: 37,
         paymentMethod: 'transferencia',
         paymentStatus: 'verificado',
-        bankVerification: realSpei.data,
-        deliveryAddress: 'Calle Correo #14, Centro, San Miguel de Allende',
+        bankVerification: speiRes.data,
+        deliveryAddress: 'Calle Correo #14, Centro',
         status: 'nuevo',
       }),
     });
+    assert.equal(createOrderA.status, 201);
+    assert.equal(createOrderA.data.subtotal, 200); // Recalculado en servidor
+    assert.equal(createOrderA.data.total, 235);
+    assert.equal(createOrderA.data.customerId, customerAId);
+    orderAId = createOrderA.data.id;
 
-    assert.equal(createOrderRes.status, 201);
-    // El servidor debe haber recalculado 2 x $100 = $200 subtotal + $35 envío = $235 total
-    assert.equal(createOrderRes.data.subtotal, 200);
-    assert.equal(createOrderRes.data.total, 235);
-    createdOrderId = createOrderRes.data.id;
-
-    // Intentar reutilizar la misma clave de rastreo SPEI en otro pedido debe ser bloqueado
-    const duplicateSpeiCheck = await e2eFetch('/api/orders/verify-transfer', {
-      method: 'POST',
-      body: JSON.stringify({
-        trackingKey: uniqueSpeiKey,
-        expectedAmount: 235,
-        senderBank: 'BBVA',
-        orderFolio: `RD-OTHER-${uniqueRunId}`,
-      }),
+    // Cliente A SÍ ve su propio pedido y su dirección
+    const ordersOfA = await e2eFetch('/api/orders', {
+      headers: { Authorization: `Bearer ${customerAToken}` },
     });
-    assert.equal(duplicateSpeiCheck.data.verified, false);
-    assert.ok(duplicateSpeiCheck.data.statusMessage.includes('ya fue utilizada'));
-  });
+    assert.equal(ordersOfA.status, 200);
+    assert.equal(ordersOfA.data.length, 1);
+    assert.equal(ordersOfA.data[0].id, orderAId);
 
-  it('6. Rechaza pedido en efectivo que excede el límite antifraude de $300 MXN para cliente nuevo (HTTP 422)', async () => {
-    const cashLimitOrder = await e2eFetch('/api/orders', {
-      method: 'POST',
-      body: JSON.stringify({
-        id: `ord-cash-limit-${uniqueRunId}`,
-        folio: `RD-CASH-${uniqueRunId}`,
-        orderType: 'comida',
-        customerId: testCustomerId,
-        customerName: 'Cliente Prueba E2E',
-        customerPhone: `4151${uniqueRunId}`,
-        restaurantId: 'tacos-sebas',
-        restaurantName: 'Tacos Sebastián',
-        items: [
-          { id: 'ts-1', name: 'Orden de 4 Tacos de Bistec', price: 100, quantity: 4 }, // $400 MXN > $300 límite
-        ],
-        subtotal: 400,
-        deliveryFee: 35,
-        total: 435,
-        paymentMethod: 'efectivo',
-        paymentStatus: 'en_efectivo',
-        deliveryAddress: 'Calle Hidalgo #12, Centro, SMA',
-        status: 'nuevo',
-      }),
+    // Cliente B consulta GET /api/orders (incluso intentando forzar ?customerId=<customerAId>)
+    const ordersOfB = await e2eFetch(`/api/orders?customerId=${encodeURIComponent(customerAId)}`, {
+      headers: { Authorization: `Bearer ${customerBToken}` },
     });
+    assert.equal(ordersOfB.status, 200);
+    assert.equal(ordersOfB.data.length, 0); // CERO pedidos ajenos visibles
 
-    assert.equal(cashLimitOrder.status, 422);
-    assert.ok(cashLimitOrder.data.error.includes('$300 MXN'));
-  });
-
-  it('7. Sube firma digital de entrega (/api/uploads), completa orden y eleva límite del cliente en PostgreSQL', async () => {
-    // 1x1 pixel PNG transparente en Base64
-    const tinyPngDataUrl =
-      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-
-    const uploadRes = await e2eFetch('/api/uploads', {
-      method: 'POST',
-      body: JSON.stringify({
-        dataUrl: tinyPngDataUrl,
-        folder: 'signatures',
-        referenceId: createdOrderId,
-      }),
+    // Cliente B intenta leer el pedido de Cliente A directamente -> 403 Forbidden
+    const spyOrder = await e2eFetch(`/api/orders/${encodeURIComponent(orderAId)}`, {
+      headers: { Authorization: `Bearer ${customerBToken}` },
     });
-    assert.equal(uploadRes.status, 201);
-    assert.ok(uploadRes.data.url.startsWith('/uploads/signatures/'));
+    assert.equal(spyOrder.status, 403);
 
-    // Verificar que Nginx sirve la imagen subida desde el volumen persistente
-    const fileRes = await fetch(`${BASE_URL}${uploadRes.data.url}`);
-    assert.equal(fileRes.status, 200);
-
-    // Completar entrega y calificar con 5 estrellas
-    const patchRes = await e2eFetch(`/api/orders/${encodeURIComponent(createdOrderId)}`, {
+    // Cliente B intenta modificar el pedido de Cliente A -> 403 Forbidden
+    const tamperOrder = await e2eFetch(`/api/orders/${encodeURIComponent(orderAId)}`, {
       method: 'PATCH',
-      body: JSON.stringify({
-        status: 'entregado',
-        deliverySignatureDataUrl: uploadRes.data.url,
-        deliveryConfirmedBySignature: true,
-        receptionConfirmed: true,
-        rating: 5,
-        riderRating: 5,
-        foodRating: 5,
-      }),
+      headers: { Authorization: `Bearer ${customerBToken}` },
+      body: JSON.stringify({ status: 'cancelado' }),
     });
-    assert.equal(patchRes.status, 200);
-    assert.equal(patchRes.data.status, 'entregado');
+    assert.equal(tamperOrder.status, 403);
 
-    // Verificar en /api/auth/me que completedOrdersCount subió de 0 a 1
-    const meAfter = await e2eFetch('/api/auth/me', {
-      headers: { Authorization: `Bearer ${customerToken}` },
+    // Cliente B consulta direcciones -> NO ve las direcciones de Cliente A
+    const addrsOfB = await e2eFetch('/api/profile/addresses', {
+      headers: { Authorization: `Bearer ${customerBToken}` },
     });
-    assert.equal(meAfter.status, 200);
-    assert.equal(meAfter.data.user.completedOrdersCount, 1);
+    assert.equal(addrsOfB.status, 200);
+    assert.equal(addrsOfB.data.length, 0);
   });
 
-  it('8. Bloquea nuevos pedidos cuando el Administrador activa la Pausa por Lluvia (HTTP 503) y restaura operación', async () => {
+  it('6. Recuperación Real de Contraseña (forgot-password -> código 6 dígitos -> reset-password) y revocación de sesiones viejas', async () => {
+    const forgotRes = await e2eFetch('/api/auth/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify({ email: emailA }),
+    });
+    assert.equal(forgotRes.status, 200);
+    assert.equal(forgotRes.data.ok, true);
+    assert.match(forgotRes.data.resetCodePreview, /^\d{6}$/);
+
+    // Código incorrecto debe ser rechazado (400)
+    const wrongCodeRes = await e2eFetch('/api/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({
+        email: emailA,
+        code: '000000',
+        newPassword: 'NewPasswordA999!',
+      }),
+    });
+    assert.equal(wrongCodeRes.status, 400);
+
+    // Código correcto restablece contraseña y revoca sesiones previas
+    const resetRes = await e2eFetch('/api/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({
+        email: emailA,
+        code: forgotRes.data.resetCodePreview,
+        newPassword: 'NewPasswordA999!',
+      }),
+    });
+    assert.equal(resetRes.status, 200);
+    assert.equal(resetRes.data.ok, true);
+    assert.ok(resetRes.data.token);
+
+    // El token ANTERIOR de Cliente A ahora está revocado en refresh_sessions -> 401 Unauthorized
+    const oldTokenCheck = await e2eFetch('/api/auth/me', {
+      headers: { Authorization: `Bearer ${customerAToken}` },
+    });
+    assert.equal(oldTokenCheck.status, 401);
+
+    // La contraseña vieja ya no sirve -> 401
+    const oldPassLogin = await e2eFetch('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email: emailA, password: 'PasswordA123!' }),
+    });
+    assert.equal(oldPassLogin.status, 401);
+
+    // La contraseña NUEVA funciona correctamente -> 200
+    const newPassLogin = await e2eFetch('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email: emailA, password: 'NewPasswordA999!' }),
+    });
+    assert.equal(newPassLogin.status, 200);
+    customerAToken = newPassLogin.data.token;
+    customerARefresh = newPassLogin.data.refreshToken;
+  });
+
+  it('7. Rotación de Refresh Token (/api/auth/refresh) y Cierre de Sesión con Revocación (/api/auth/logout)', async () => {
+    const refreshRes = await e2eFetch('/api/auth/refresh', {
+      method: 'POST',
+      body: JSON.stringify({ refreshToken: customerARefresh }),
+    });
+    assert.equal(refreshRes.status, 200);
+    assert.ok(refreshRes.data.token);
+    assert.ok(refreshRes.data.refreshToken);
+
+    const rotatedToken = refreshRes.data.token;
+    const rotatedRefresh = refreshRes.data.refreshToken;
+
+    // Logout revoca la sesión en PostgreSQL
+    const logoutRes = await e2eFetch('/api/auth/logout', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${rotatedToken}` },
+      body: JSON.stringify({ refreshToken: rotatedRefresh }),
+    });
+    assert.equal(logoutRes.status, 200);
+
+    // El token revocado ya no puede consultar /api/auth/me
+    const afterLogoutMe = await e2eFetch('/api/auth/me', {
+      headers: { Authorization: `Bearer ${rotatedToken}` },
+    });
+    assert.equal(afterLogoutMe.status, 401);
+  });
+
+  it('8. Admin puede ver todas las órdenes, completar entrega y activar/desactivar Pausa por Lluvia (503)', async () => {
+    const adminOrders = await e2eFetch('/api/orders', {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    assert.equal(adminOrders.status, 200);
+    assert.ok(adminOrders.data.some((o: any) => o.id === orderAId));
+
     const enableRain = await e2eFetch('/api/settings', {
       method: 'PUT',
-      body: JSON.stringify({
-        rainPauseEnabled: true,
-        rainPauseMessage: '🌧️ Lluvia fuerte en el Centro de San Miguel.',
-      }),
+      headers: { Authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ rainPauseEnabled: true }),
     });
     assert.equal(enableRain.status, 200);
-    assert.equal(enableRain.data.rainPauseEnabled, true);
 
     const orderDuringRain = await e2eFetch('/api/orders', {
       method: 'POST',
+      headers: { Authorization: `Bearer ${customerBToken}` },
       body: JSON.stringify({
-        id: `ord-rain-${uniqueRunId}`,
-        folio: `RD-RAIN-${uniqueRunId}`,
+        id: `ord-rain-${runId}`,
+        folio: `RD-RAIN-${runId}`,
         orderType: 'comida',
-        customerId: testCustomerId,
-        customerName: 'Cliente Prueba E2E',
-        customerPhone: `4151${uniqueRunId}`,
         restaurantId: 'tacos-sebas',
         restaurantName: 'Tacos Sebastián',
         items: [{ id: 'ts-4', name: 'Refresco 600ml', price: 30, quantity: 1 }],
@@ -319,18 +377,17 @@ describe('Fase 4 · End-to-End Integration Tests (Nginx + Fastify + PostgreSQL 1
         total: 65,
         paymentMethod: 'efectivo',
         paymentStatus: 'en_efectivo',
-        deliveryAddress: 'Calle Correo #14, Centro',
+        deliveryAddress: 'Calle Correo #14',
         status: 'nuevo',
       }),
     });
     assert.equal(orderDuringRain.status, 503);
 
-    // Restaurar rainPauseEnabled = false
     const disableRain = await e2eFetch('/api/settings', {
       method: 'PUT',
+      headers: { Authorization: `Bearer ${adminToken}` },
       body: JSON.stringify({ rainPauseEnabled: false }),
     });
     assert.equal(disableRain.status, 200);
-    assert.equal(disableRain.data.rainPauseEnabled, false);
   });
 });

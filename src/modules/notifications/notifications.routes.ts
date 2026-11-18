@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { prisma } from '../../infra/prisma.js';
-import { broadcastEvent } from '../../infra/socket.js';
+import { broadcastEvent, emitAdminEvent } from '../../infra/socket.js';
+import { requireAdmin } from '../../middlewares/auth.js';
 
 export async function notificationsRoutes(app: FastifyInstance): Promise<void> {
   // 1. NOTIFICACIONES DE MARKETING / BROADCAST
@@ -12,7 +13,7 @@ export async function notificationsRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(rows);
   });
 
-  app.post('/api/broadcasts', async (request, reply) => {
+  app.post('/api/broadcasts', { preHandler: [requireAdmin] }, async (request, reply) => {
     const body = request.body as any;
     if (!body || !body.title || !body.message) {
       return reply.status(400).send({ error: 'Título y mensaje son requeridos.' });
@@ -35,7 +36,7 @@ export async function notificationsRoutes(app: FastifyInstance): Promise<void> {
         promoCode: body.promoCode || null,
         scheduledFor: body.scheduledFor || null,
         sendImmediately: Boolean(body.sendImmediately ?? true),
-        sentBy: String(body.sentBy || 'Admin RODO'),
+        sentBy: request.authUser!.email,
         createdAt: String(body.createdAt || new Date().toISOString()),
       },
     });
@@ -44,8 +45,8 @@ export async function notificationsRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(201).send(saved);
   });
 
-  // 2. BITÁCORA INMUTABLE DE AUDITORÍA ADMINISTRATIVA
-  app.get('/api/audit-logs', async (request, reply) => {
+  // 2. BITÁCORA INMUTABLE DE AUDITORÍA ADMINISTRATIVA (EXCLUSIVO ADMIN)
+  app.get('/api/audit-logs', { preHandler: [requireAdmin] }, async (request, reply) => {
     const { limit = '100' } = request.query as { limit?: string };
     const takeCount = Math.min(500, Math.max(1, parseInt(limit, 10) || 100));
 
@@ -56,7 +57,7 @@ export async function notificationsRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(rows);
   });
 
-  app.post('/api/audit-logs', async (request, reply) => {
+  app.post('/api/audit-logs', { preHandler: [requireAdmin] }, async (request, reply) => {
     const body = request.body as any;
     if (!body) {
       return reply.status(400).send({ error: 'Datos de auditoría vacíos.' });
@@ -69,7 +70,8 @@ export async function notificationsRoutes(app: FastifyInstance): Promise<void> {
       create: {
         id,
         timestamp: String(body.timestamp || new Date().toISOString()),
-        adminEmail: String(body.adminEmail || body.user_id || 'edsoncruz14999@gmail.com'),
+        adminEmail: request.authUser!.email,
+        adminUserId: request.authUser!.sub,
         actionType: String(body.actionType || body.action || 'accion_admin'),
         details: String(body.details || ''),
         affectedFolio: body.affectedFolio || body.affected_folio || null,
@@ -80,7 +82,7 @@ export async function notificationsRoutes(app: FastifyInstance): Promise<void> {
       },
     });
 
-    broadcastEvent('audit:created', created);
+    emitAdminEvent('audit:created', created);
     return reply.status(201).send(created);
   });
 }

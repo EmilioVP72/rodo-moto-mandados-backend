@@ -136,11 +136,11 @@ const INITIAL_DEBTOR_ACCOUNTS = [
 
 export async function runInitialDatabaseSeed(): Promise<void> {
   try {
-    // 1. Asegurar cuenta maestra de Administrador con contraseña encriptada (Bcrypt)
+    // 1. Asegurar cuenta maestra de Administrador con contraseña encriptada (Bcrypt cost 12)
     const adminEmail = env.ADMIN_EMAIL.toLowerCase();
     const existingAdmin = await prisma.user.findUnique({ where: { email: adminEmail } });
     if (!existingAdmin) {
-      const passwordHash = await bcrypt.hash(env.ADMIN_INITIAL_PASSWORD, 10);
+      const passwordHash = await bcrypt.hash(env.ADMIN_INITIAL_PASSWORD, 12);
       await prisma.user.create({
         data: {
           id: 'admin-master-rodo',
@@ -157,12 +157,14 @@ export async function runInitialDatabaseSeed(): Promise<void> {
     }
 
     // 2. Asegurar cuentas de muestra en lista de control antifraude / deudas INE
+    const sampleDebtorHash = await bcrypt.hash('RODO-BLOCKED-SAMPLE-2026', 10);
     for (const acc of INITIAL_DEBTOR_ACCOUNTS) {
       const exists = await prisma.user.findUnique({ where: { email: acc.email } });
       if (!exists) {
         await prisma.user.create({
           data: {
             ...acc,
+            passwordHash: sampleDebtorHash,
             role: 'CUSTOMER',
           },
         });
