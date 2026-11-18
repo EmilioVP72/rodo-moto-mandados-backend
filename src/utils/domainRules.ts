@@ -166,3 +166,42 @@ export function recalculateOrderTotalsServer(params: {
   const calculatedTotal = Math.max(0, verifiedSubtotal + deliveryFee + tipAmount - promoDiscount);
   return { verifiedSubtotal, calculatedTotal };
 }
+
+export function validateGpsCoordinates(
+  lat: unknown,
+  lng: unknown
+): { valid: boolean; lat: number; lng: number; isWithinSmaRegion: boolean } {
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+
+  if (
+    typeof lat === 'boolean' ||
+    typeof lng === 'boolean' ||
+    lat === null ||
+    lng === null ||
+    lat === '' ||
+    lng === '' ||
+    Number.isNaN(latNum) ||
+    Number.isNaN(lngNum) ||
+    !Number.isFinite(latNum) ||
+    !Number.isFinite(lngNum)
+  ) {
+    return { valid: false, lat: 0, lng: 0, isWithinSmaRegion: false };
+  }
+
+  if (latNum < -90 || latNum > 90 || lngNum < -180 || lngNum > 180) {
+    return { valid: false, lat: latNum, lng: lngNum, isWithinSmaRegion: false };
+  }
+
+  // Región ampliada de San Miguel de Allende y alrededores (Guanajuato / Querétaro)
+  const isWithinSmaRegion =
+    latNum >= 20.7 && latNum <= 21.15 && lngNum >= -101.0 && lngNum <= -100.5;
+
+  return {
+    valid: true,
+    lat: Number(latNum.toFixed(6)),
+    lng: Number(lngNum.toFixed(6)),
+    isWithinSmaRegion,
+  };
+}
+

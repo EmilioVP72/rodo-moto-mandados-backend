@@ -5,6 +5,7 @@ import {
   getServerCustomerCashLimit,
   validateSpeiTrackingKeyFormat,
   recalculateOrderTotalsServer,
+  validateGpsCoordinates,
 } from '../src/utils/domainRules.ts';
 
 describe('Backend Domain Rules & Security Unit Tests', () => {
@@ -132,6 +133,30 @@ describe('Backend Domain Rules & Security Unit Tests', () => {
 
       assert.equal(result.verifiedSubtotal, 49);
       assert.equal(result.calculatedTotal, 99);
+    });
+  });
+
+  describe('5. validateGpsCoordinates (Validación de Coordenadas GPS en Vivo del Repartidor)', () => {
+    it('rechaza valores nulos, vacíos, NaN o fuera del globo terráqueo (-90..90, -180..180)', () => {
+      assert.equal(validateGpsCoordinates(null, -100.74).valid, false);
+      assert.equal(validateGpsCoordinates('', '').valid, false);
+      assert.equal(validateGpsCoordinates('abc', -100.74).valid, false);
+      assert.equal(validateGpsCoordinates(95.5, -100.74).valid, false);
+      assert.equal(validateGpsCoordinates(20.91, -195.0).valid, false);
+    });
+
+    it('valida coordenadas dentro de San Miguel de Allende y marca isWithinSmaRegion = true', () => {
+      const check = validateGpsCoordinates(20.91441234, -100.74371234);
+      assert.equal(check.valid, true);
+      assert.equal(check.isWithinSmaRegion, true);
+      assert.equal(check.lat, 20.914412);
+      assert.equal(check.lng, -100.743712);
+    });
+
+    it('valida coordenadas válidas fuera de la región pero marca isWithinSmaRegion = false', () => {
+      const check = validateGpsCoordinates(19.4326, -99.1332); // CDMX
+      assert.equal(check.valid, true);
+      assert.equal(check.isWithinSmaRegion, false);
     });
   });
 });
