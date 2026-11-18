@@ -1,13 +1,11 @@
 import { FastifyInstance } from 'fastify';
 import { prisma } from '../../infra/prisma.js';
 import { broadcastEvent } from '../../infra/socket.js';
-
-function getServerCustomerCashLimit(completedOrdersCount: number): number {
-  if (completedOrdersCount <= 0) return 300;
-  if (completedOrdersCount === 1) return 400;
-  if (completedOrdersCount === 2) return 500;
-  return 1000;
-}
+import {
+  getServerCustomerCashLimit,
+  validateSpeiTrackingKeyFormat,
+  recalculateOrderTotalsServer,
+} from '../../utils/domainRules.js';
 
 function mapOrderRowToPayload(row: any) {
   const payload = (row.payload || {}) as Record<string, unknown>;
@@ -61,31 +59,17 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       orderFolio?: string;
     };
 
-    const cleanKey = (body?.trackingKey || '').trim().toUpperCase().replace(/\s+/g, '');
     const senderBank = (body?.senderBank || 'SPEI Interbancario').trim();
     const expectedAmount = Math.max(0, Number(body?.expectedAmount) || 0);
 
-    if (!cleanKey || cleanKey.length < 6 || cleanKey.length > 35 || !/^[A-Z0-9_-]+$/.test(cleanKey)) {
+    const formatCheck = validateSpeiTrackingKeyFormat(body?.trackingKey || '');
+    const cleanKey = formatCheck.cleanKey;
+    if (!formatCheck.valid) {
       return reply.send({
         trackingKey: cleanKey,
         senderBank,
         verified: false,
-        statusMessage:
-          'Clave de rastreo SPEI o referencia inválida. Debe contener entre 6 y 35 caracteres alfanuméricos sin espacios.',
-      });
-    }
-
-    // Bloquear patrones falsos o secuencias repetitivas
-    if (
-      /^([0-9A-Z])\1{5,}$/.test(cleanKey) ||
-      /^(123456|1234567|12345678|654321|ABCDEF|PRUEBA|TEST00|000000|111111)$/.test(cleanKey)
-    ) {
-      return reply.send({
-        trackingKey: cleanKey,
-        senderBank,
-        verified: false,
-        statusMessage:
-          'Alerta antifraude: La clave ingresada es una secuencia de prueba y no corresponde a una liquidación SPEI válida.',
+        statusMessage: formatCheck.reason || 'Clave de rastreo SPEI inválida.',
       });
     }
 

@@ -5,23 +5,7 @@ import { prisma } from '../../infra/prisma.js';
 import { env } from '../../config/env.js';
 import { signAuthToken, optionalAuth, requireAuth } from '../../middlewares/auth.js';
 import { broadcastEvent } from '../../infra/socket.js';
-
-/**
- * Validación matemática del reverso de credencial INE (10 dígitos) en el servidor
- */
-function verifyIneDigitsServer(digits: string): { valid: boolean; reason?: string } {
-  const clean = digits.replace(/[^0-9]/g, '');
-  if (clean.length !== 10) {
-    return { valid: false, reason: 'El número del reverso del INE debe tener exactamente 10 dígitos.' };
-  }
-  if (/^(\d)\1{9}$/.test(clean) || clean === '1234567890' || clean === '0123456789') {
-    return {
-      valid: false,
-      reason: 'Secuencia numérica inválida. Ingresa los 10 dígitos reales del reverso de tu INE.',
-    };
-  }
-  return { valid: true };
-}
+import { verifyIneDigitsServer } from '../../utils/domainRules.js';
 
 function serializeUserAccount(user: any) {
   return {
