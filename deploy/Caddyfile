@@ -1,0 +1,31 @@
+{$DOMAIN:localhost} {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # Rutas de API REST hacia Fastify
+    handle /api/* {
+        reverse_proxy rodo-api:4000
+    }
+
+    # WebSockets en tiempo real (Socket.IO) hacia Fastify
+    handle /socket.io/* {
+        reverse_proxy rodo-api:4000
+    }
+
+    # Archivos persistentes subidos (firmas, fotos de entrega, INE recuperación)
+    handle /uploads/* {
+        reverse_proxy rodo-api:4000
+    }
+
+    # Aplicación Web PWA (React 19 + Nginx)
+    handle {
+        reverse_proxy rodo-web:80
+    }
+}
