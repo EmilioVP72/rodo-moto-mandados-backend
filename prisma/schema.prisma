@@ -1,0 +1,168 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  PARTNER_LOCAL
+  RIDER
+  CUSTOMER
+}
+
+enum AccountStatus {
+  activo
+  bloqueado_fraude
+}
+
+model User {
+  id                   String        @id
+  name                 String
+  phone                String
+  email                String        @unique
+  passwordHash         String?
+  role                 UserRole      @default(CUSTOMER)
+  ineVerified          Boolean       @default(false)
+  ine10Digits          String?
+  inePhotoUploaded     Boolean       @default(false)
+  ineVerifiedAt        String?
+  pendingDebt          Float         @default(0)
+  debtReason           String?
+  debtOrderFolio       String?
+  debtDate             String?
+  status               AccountStatus @default(activo)
+  fraudReason          String?
+  blockedAt            String?
+  completedOrdersCount Int           @default(0)
+  referralCode         String?
+  referredByCode       String?
+  referralRewardsCount Int           @default(0)
+  coupons              Json          @default("[]")
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  @@index([phone])
+  @@index([ine10Digits])
+  @@index([referralCode])
+}
+
+model Restaurant {
+  id                String   @id
+  name              String
+  establishmentType String   @default("restaurante")
+  category          String
+  deliveryFee       Float    @default(35)
+  commissionRate    Float    @default(15)
+  isActive          Boolean  @default(true)
+  isOpen            Boolean  @default(true)
+  payload           Json
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([category])
+  @@index([isActive])
+}
+
+model PartnerLocal {
+  id            String   @id
+  code          String   @unique
+  name          String
+  phone         String
+  serviceFee    Float    @default(35)
+  address       Json
+  contactPerson String?
+  notes         String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Order {
+  id                  String   @id
+  folio               String   @unique
+  orderType           String   @default("comida")
+  customerId          String
+  customerName        String
+  customerPhone       String
+  customerEmail       String?
+  restaurantId        String
+  restaurantName      String
+  subtotal            Float    @default(0)
+  deliveryFee         Float    @default(0)
+  commissionAmount    Float    @default(0)
+  total               Float    @default(0)
+  paymentMethod       String   @default("efectivo")
+  paymentStatus       String   @default("en_efectivo")
+  deliveryAddress     String
+  status              String   @default("nuevo")
+  assignedRiderName   String?
+  assignedRiderPhone  String?
+  payload             Json
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([customerId])
+  @@index([status])
+  @@index([createdAt(sort: Desc)])
+}
+
+model Setting {
+  id        String   @id @default("general")
+  payload   Json
+  updatedAt DateTime @updatedAt
+}
+
+model AuditLog {
+  id                 String   @id
+  timestamp          String
+  adminEmail         String
+  actionType         String
+  details            String
+  affectedFolio      String?
+  affectedRestaurant String?
+  previousValue      Json?
+  newValue           Json?
+  metadata           Json?
+  createdAt          DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+}
+
+model BroadcastNotification {
+  id              String   @id
+  title           String
+  message         String
+  promoCode       String?
+  scheduledFor    String?
+  sendImmediately Boolean  @default(true)
+  sentBy          String
+  createdAt       String
+  storedAt        DateTime @default(now())
+
+  @@index([storedAt(sort: Desc)])
+}
+
+model AccountRecoveryRequest {
+  id               String   @id
+  folio            String   @unique
+  customerName     String
+  phone            String
+  oldEmail         String
+  newEmail         String
+  reason           String?
+  documentPhotoUrl String?
+  ine10Digits      String?
+  status           String   @default("pendiente")
+  adminNotes       String?
+  reviewedBy       String?
+  reviewedAt       String?
+  createdAt        String
+  storedAt         DateTime @default(now())
+
+  @@index([newEmail, status])
+  @@index([storedAt(sort: Desc)])
+}
