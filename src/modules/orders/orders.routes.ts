@@ -2,6 +2,13 @@ import { FastifyInstance } from 'fastify';
 import { prisma } from '../../infra/prisma.js';
 import { broadcastEvent } from '../../infra/socket.js';
 
+function getServerCustomerCashLimit(completedOrdersCount: number): number {
+  if (completedOrdersCount <= 0) return 300;
+  if (completedOrdersCount === 1) return 400;
+  if (completedOrdersCount === 2) return 500;
+  return 1000;
+}
+
 function mapOrderRowToPayload(row: any) {
   const payload = (row.payload || {}) as Record<string, unknown>;
   return {
@@ -45,55 +52,211 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(rows.map(mapOrderRowToPayload));
   });
 
-  // 2. CREAR ORDEN CON VALIDACIÓN SERVER-SIDE Y NOTIFICACIÓN EN TIEMPO REAL
+  // 2. VERIFICACIÓN SERVER-SIDE DE TRANSFERENCIA SPEI (ANTI-REUTILIZACIÓN DE CLAVES DE RASTREO)
+  app.post('/api/orders/verify-transfer', async (request, reply) => {
+    const body = request.body as {
+      trackingKey?: string;
+      expectedAmount?: number;
+      senderBank?: string;
+      orderFolio?: string;
+    };
+
+    const cleanKey = (body?.trackingKey || '').trim().toUpperCase().replace(/\s+/g, '');
+    const senderBank = (body?.senderBank || 'SPEI Interbancario').trim();
+    const expectedAmount = Math.max(0, Number(body?.expectedAmount) || 0);
+
+    if (!cleanKey || cleanKey.length < 6 || cleanKey.length > 35 || !/^[A-Z0-9_-]+$/.test(cleanKey)) {
+      return reply.send({
+        trackingKey: cleanKey,
+        senderBank,
+        verified: false,
+        statusMessage:
+          'Clave de rastreo SPEI o referencia inválida. Debe contener entre 6 y 35 caracteres alfanuméricos sin espacios.',
+      });
+    }
+
+    // Bloquear patrones falsos o secuencias repetitivas
+    if (
+      /^([0-9A-Z])\1{5,}$/.test(cleanKey) ||
+      /^(123456|1234567|12345678|654321|ABCDEF|PRUEBA|TEST00|000000|111111)$/.test(cleanKey)
+    ) {
+      return reply.send({
+        trackingKey: cleanKey,
+        senderBank,
+        verified: false,
+        statusMessage:
+          'Alerta antifraude: La clave ingresada es una secuencia de prueba y no corresponde a una liquidación SPEI válida.',
+      });
+    }
+
+    // Verificar en PostgreSQL que la clave de rastreo no haya sido usada en otro pedido previo
+    const recentOrders = await prisma.order.findMany({
+      where: { paymentMethod: 'transferencia' },
+      orderBy: { createdAt: 'desc' },
+      take: 300,
+    });
+
+    const duplicateOrder = recentOrders.find((ord) => {
+      const p = (ord.payload || {}) as any;
+      const existingKey = String(p?.bankVerification?.trackingKey || '')
+        .trim()
+        .toUpperCase()
+        .replace(/\s+/g, '');
+      return existingKey === cleanKey && ord.folio !== body?.orderFolio;
+    });
+
+    if (duplicateOrder) {
+      return reply.send({
+        trackingKey: cleanKey,
+        senderBank,
+        verified: false,
+        statusMessage: `Alerta antifraude: La clave de rastreo ${cleanKey} ya fue utilizada previamente en la orden #${duplicateOrder.folio}. Ingresa una transferencia nueva.`,
+      });
+    }
+
+    const now = new Date();
+    const authCode = `${now.getHours().toString().padStart(2, '0')}${now.getMinutes().toString().padStart(2, '0')}-${cleanKey.slice(-4)}`;
+
+    return reply.send({
+      trackingKey: cleanKey,
+      senderBank,
+      verified: true,
+      verifiedAt: now.toLocaleTimeString('es-MX', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }),
+      verifiedAmount: expectedAmount,
+      statusMessage: `Referencia SPEI #${cleanKey} registrada por $${expectedAmount.toFixed(2)} MXN (${senderBank} · Folio Auditoría #${authCode}). Sujeta a validación de despacho.`,
+    });
+  });
+
+  // 3. CREAR ORDEN CON BLINDAJE SERVER-SIDE Y NOTIFICACIÓN EN TIEMPO REAL
   app.post('/api/orders', async (request, reply) => {
     const body = request.body as any;
     if (!body || !body.folio || !body.restaurantName) {
       return reply.status(400).send({ error: 'Datos de la orden incompletos.' });
     }
 
-    // Verificar si la pausa por lluvia está activa en la configuración global
+    // 3.1 Verificar si la pausa por lluvia está activa en la configuración global
     const settingsDoc = await prisma.setting.findUnique({ where: { id: 'general' } });
     const settings = (settingsDoc?.payload || {}) as any;
     if (settings.rainPauseEnabled === true) {
       return reply.status(503).send({
         error:
           settings.rainPauseMessage ||
-          'Envíos pausados temporalmente por lluvia en San Miguel de Allende.',
+          '🌧️ Envíos pausados temporalmente por lluvia en San Miguel de Allende.',
       });
     }
 
-    // Recalcular subtotal en el servidor a partir de los items para evitar manipulación de precios
+    // 3.2 Verificar estado de la cuenta del cliente en PostgreSQL (bloqueos antifraude y adeudos)
+    const cleanPhone = String(body.customerPhone || '').replace(/[^0-9]/g, '');
+    const cleanEmail = String(body.customerEmail || '').trim().toLowerCase();
+    const customerUser = await prisma.user.findFirst({
+      where: {
+        OR: [
+          ...(body.customerId ? [{ id: String(body.customerId) }] : []),
+          ...(cleanEmail ? [{ email: cleanEmail }] : []),
+          ...(cleanPhone.length >= 8 ? [{ phone: { contains: cleanPhone } }] : []),
+        ],
+      },
+    });
+
+    if (customerUser && (customerUser.status === 'bloqueado_fraude' || customerUser.pendingDebt > 0)) {
+      return reply.status(403).send({
+        error:
+          customerUser.pendingDebt > 0
+            ? `⛔ Cuenta bloqueada por adeudo pendiente de $${customerUser.pendingDebt.toFixed(2)} MXN (Folio ${customerUser.debtOrderFolio || 'S/N'}). Contacta a soporte RODO para liquidar tu saldo.`
+            : `⛔ Cuenta suspendida por seguridad (${customerUser.fraudReason || 'Reporte antifraude en plataforma'}).`,
+      });
+    }
+
+    // 3.3 Verificar restaurante abierto y recalcular subtotal en el servidor
     const items = Array.isArray(body.items) ? body.items : [];
     let verifiedSubtotal = 0;
+    const isStandardFoodOrder =
+      !body.isCustomQuote &&
+      body.orderType !== 'auxilio_gasolina' &&
+      body.orderType !== 'solicitud_local' &&
+      body.orderType !== 'envio';
 
-    if (items.length > 0 && !body.isCustomQuote && body.orderType !== 'auxilio_gasolina' && body.orderType !== 'solicitud_local') {
+    if (isStandardFoodOrder) {
       const restaurantDoc = await prisma.restaurant.findUnique({
         where: { id: String(body.restaurantId || '') },
       });
-      const menuList: any[] = Array.isArray((restaurantDoc?.payload as any)?.menu)
-        ? (restaurantDoc?.payload as any).menu
-        : [];
-      const menuMap = new Map(menuList.map((m) => [String(m.id), m]));
 
-      for (const item of items) {
-        const qty = Math.max(1, Number(item.quantity) || 1);
-        const catalogItem = menuMap.get(String(item.id));
-        const unitExtra = Math.max(0, Number(item.unitExtraPrice) || 0);
-        const unitPrice = catalogItem
-          ? Math.max(0, Number(catalogItem.price) || 0) + unitExtra
-          : Math.max(0, Number(item.price) || 0);
-        verifiedSubtotal += unitPrice * qty;
+      if (restaurantDoc && (!restaurantDoc.isActive || !restaurantDoc.isOpen)) {
+        const restPayload = (restaurantDoc.payload || {}) as any;
+        return reply.status(409).send({
+          error: `🚫 El establecimiento "${restaurantDoc.name}" acaba de cerrar sus pedidos (${restPayload.closureReason || 'cierre temporal'}).`,
+        });
+      }
+
+      if (items.length > 0) {
+        const menuList: any[] = Array.isArray((restaurantDoc?.payload as any)?.menu)
+          ? (restaurantDoc?.payload as any).menu
+          : [];
+        const menuMap = new Map(menuList.map((m) => [String(m.id), m]));
+
+        for (const item of items) {
+          const qty = Math.max(1, Number(item.quantity) || 1);
+          const catalogItem = menuMap.get(String(item.id));
+          const unitExtra = Math.max(0, Number(item.unitExtraPrice) || 0);
+          const unitPrice = catalogItem
+            ? Math.max(0, Number(catalogItem.price) || 0) + unitExtra
+            : Math.max(0, Number(item.price) || 0);
+          verifiedSubtotal += unitPrice * qty;
+        }
+      } else {
+        verifiedSubtotal = Math.max(0, Number(body.subtotal) || 0);
+      }
+
+      // 3.4 Validar límite antifraude de pago en efectivo según historial real en PostgreSQL
+      if (body.paymentMethod === 'efectivo' && customerUser) {
+        const cashLimit = getServerCustomerCashLimit(customerUser.completedOrdersCount);
+        if (verifiedSubtotal > cashLimit) {
+          return reply.status(422).send({
+            error: `Por política antifraude para tu pedido #${customerUser.completedOrdersCount + 1}, el límite en efectivo es de $${cashLimit} MXN en productos. Selecciona Pago por Transferencia (sin límite) o reduce tu pedido.`,
+          });
+        }
       }
     } else {
       verifiedSubtotal = Math.max(0, Number(body.subtotal) || 0);
+    }
+
+    // 3.5 Si es transferencia bancaria, verificar que la clave de rastreo no sea duplicada
+    if (body.paymentMethod === 'transferencia' && body.bankVerification?.trackingKey) {
+      const cleanTrack = String(body.bankVerification.trackingKey)
+        .trim()
+        .toUpperCase()
+        .replace(/\s+/g, '');
+      const recentTransfers = await prisma.order.findMany({
+        where: { paymentMethod: 'transferencia' },
+        orderBy: { createdAt: 'desc' },
+        take: 200,
+      });
+      const dup = recentTransfers.find((ord) => {
+        const p = (ord.payload || {}) as any;
+        const k = String(p?.bankVerification?.trackingKey || '')
+          .trim()
+          .toUpperCase()
+          .replace(/\s+/g, '');
+        return k === cleanTrack && ord.folio !== body.folio && ord.id !== body.id;
+      });
+      if (dup) {
+        return reply.status(409).send({
+          error: `Alerta antifraude: La clave de rastreo SPEI ${cleanTrack} ya fue registrada en el pedido #${dup.folio}.`,
+        });
+      }
     }
 
     const deliveryFee = Math.max(0, Number(body.deliveryFee) || 0);
     const tipAmount = Math.max(0, Number(body.tipAmount) || 0);
     const promoDiscount = Math.max(0, Number(body.promoDiscountApplied) || 0);
     const calculatedTotal =
-      body.orderType === 'auxilio_gasolina' || body.orderType === 'solicitud_local' || body.isCustomQuote
+      body.orderType === 'auxilio_gasolina' ||
+      body.orderType === 'solicitud_local' ||
+      body.isCustomQuote
         ? Math.max(0, Number(body.total) || 0)
         : Math.max(0, verifiedSubtotal + deliveryFee + tipAmount - promoDiscount);
 
@@ -149,13 +312,34 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       },
     });
 
+    // 3.6 Si aplicó un cupón personal de referido, marcarlo como usado en PostgreSQL
+    if (body.promoCode && customerUser && Array.isArray(customerUser.coupons)) {
+      const codeUpper = String(body.promoCode).trim().toUpperCase();
+      let couponMatched = false;
+      const updatedCoupons = (customerUser.coupons as any[]).map((c) => {
+        if (String(c.code || '').toUpperCase() === codeUpper && !c.used) {
+          couponMatched = true;
+          return { ...c, used: true, usedAt: nowIso, usedOrderFolio: saved.folio };
+        }
+        return c;
+      });
+      if (couponMatched) {
+        await prisma.user
+          .update({
+            where: { id: customerUser.id },
+            data: { coupons: updatedCoupons },
+          })
+          .catch(() => {});
+      }
+    }
+
     const mapped = mapOrderRowToPayload(saved);
     broadcastEvent('orders:created', mapped);
     broadcastEvent('orders:updated', mapped);
     return reply.status(201).send(mapped);
   });
 
-  // 3. CREACIÓN EN LOTE (SIMULACIÓN DE CARGA OPERATIVA)
+  // 4. CREACIÓN EN LOTE (SIMULACIÓN DE CARGA OPERATIVA)
   app.post('/api/orders/batch', async (request, reply) => {
     const body = request.body as { orders?: any[] };
     const orders = Array.isArray(body?.orders) ? body.orders.slice(0, 450) : [];
@@ -204,7 +388,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ ok: true, count: orders.length });
   });
 
-  // 4. ACTUALIZAR ESTADO, ASIGNACIÓN DE REPARTIDOR, FIRMA O CALIFICACIÓN DE ORDEN
+  // 5. ACTUALIZAR ESTADO, ASIGNACIÓN DE REPARTIDOR, FIRMA O CALIFICACIÓN DE ORDEN
   app.patch('/api/orders/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
     const updates = request.body as Record<string, any>;

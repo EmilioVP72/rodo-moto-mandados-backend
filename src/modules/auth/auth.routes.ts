@@ -569,4 +569,113 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     broadcastEvent('recovery:updated', updated);
     return reply.send(updated);
   });
+
+  // 6. LISTA NEGRA CENTRALIZADA DE CLIENTES BLOQUEADOS EN POSTGRESQL
+  app.get('/api/auth/blocked-customers', async (_request, reply) => {
+    const blockedUsers = await prisma.user.findMany({
+      where: {
+        OR: [{ status: 'bloqueado_fraude' }, { pendingDebt: { gt: 0 } }],
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    const list = blockedUsers.map((u) => ({
+      identifier: u.phone || u.email,
+      customerName: u.name,
+      reason: u.fraudReason || u.debtReason || 'Bloqueado por seguridad o adeudo pendiente',
+      blockedAt: u.blockedAt || u.updatedAt.toISOString(),
+    }));
+    return reply.send(list);
+  });
+
+  app.post('/api/auth/blocked-customers', async (request, reply) => {
+    const body = request.body as {
+      identifier?: string;
+      customerName?: string;
+      reason?: string;
+    };
+    const identifier = String(body?.identifier || '').trim();
+    if (!identifier) {
+      return reply.status(400).send({ error: 'Identificador (teléfono o correo) requerido.' });
+    }
+
+    const cleanPhone = identifier.replace(/[^0-9]/g, '');
+    const isEmail = identifier.includes('@');
+    const cleanEmail = isEmail ? identifier.toLowerCase() : `blocked-${cleanPhone || Date.now()}@rodo.local`;
+    const nowIso = new Date().toISOString();
+    const reason = body?.reason || 'Actividad sospechosa o intento de fraude detectado';
+
+    const existing = await prisma.user.findFirst({
+      where: {
+        OR: [
+          ...(isEmail ? [{ email: cleanEmail }] : []),
+          ...(cleanPhone.length >= 8 ? [{ phone: { contains: cleanPhone } }] : []),
+        ],
+      },
+    });
+
+    let updatedUser;
+    if (existing) {
+      updatedUser = await prisma.user.update({
+        where: { id: existing.id },
+        data: {
+          status: 'bloqueado_fraude',
+          fraudReason: reason,
+          blockedAt: nowIso,
+        },
+      });
+    } else {
+      updatedUser = await prisma.user.create({
+        data: {
+          id: `cust-blocked-${Date.now()}`,
+          name: body?.customerName || 'Cliente Bloqueado',
+          phone: cleanPhone || identifier,
+          email: cleanEmail,
+          role: 'CUSTOMER',
+          status: 'bloqueado_fraude',
+          fraudReason: reason,
+          blockedAt: nowIso,
+        },
+      });
+    }
+
+    broadcastEvent('accounts:updated', serializeUserAccount(updatedUser));
+    return reply.status(201).send({
+      identifier,
+      customerName: updatedUser.name,
+      reason,
+      blockedAt: nowIso,
+    });
+  });
+
+  app.delete('/api/auth/blocked-customers/:identifier', async (request, reply) => {
+    const { identifier } = request.params as { identifier: string };
+    const cleanId = decodeURIComponent(identifier || '').trim();
+    const cleanPhone = cleanId.replace(/[^0-9]/g, '');
+
+    const matched = await prisma.user.findMany({
+      where: {
+        OR: [
+          { email: cleanId.toLowerCase() },
+          ...(cleanPhone.length >= 8 ? [{ phone: { contains: cleanPhone } }] : []),
+        ],
+      },
+    });
+
+    for (const u of matched) {
+      const updated = await prisma.user.update({
+        where: { id: u.id },
+        data: {
+          status: 'activo',
+          pendingDebt: 0,
+          fraudReason: null,
+          debtReason: null,
+          blockedAt: null,
+        },
+      });
+      broadcastEvent('accounts:updated', serializeUserAccount(updated));
+    }
+
+    return reply.send({ ok: true, identifier: cleanId });
+  });
 }
