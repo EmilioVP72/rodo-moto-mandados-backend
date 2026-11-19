@@ -175,19 +175,23 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
   });
 
   it('5. Aislamiento Estricto Multi-Usuario: Cliente B JAMÁS puede ver ni editar direcciones ni pedidos de Cliente A', async () => {
-    // Cliente A guarda su dirección privada en customer_addresses
+    // Cliente A guarda su dirección privada en customer_addresses (incluyendo Departamento con numero NULL + numeroInterior)
     const addrRes = await e2eFetch('/api/profile/addresses', {
       method: 'POST',
       headers: { Authorization: `Bearer ${customerAToken}` },
       body: JSON.stringify({
-        label: 'Casa de Cliente A',
+        label: 'Departamento',
         calle: 'Calle Correo',
-        numero: '14',
+        numero: null,
+        numeroInterior: '4B',
         colonia: 'Centro',
         isDefault: true,
       }),
     });
     assert.equal(addrRes.status, 201);
+    assert.equal(addrRes.data.label, 'Departamento');
+    assert.equal(addrRes.data.numero, null);
+    assert.equal(addrRes.data.numeroInterior, '4B');
 
     // Cliente A verifica SPEI y crea un pedido (con precio alterado para validar recálculo server-side)
     const speiRes = await e2eFetch('/api/orders/verify-transfer', {

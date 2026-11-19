@@ -98,18 +98,19 @@ model PasswordResetToken {
 
 // 4. DIRECCIONES GUARDADAS POR CLIENTE (AISLADAS POR USER_ID)
 model CustomerAddress {
-  id          String   @id @default(cuid())
-  userId      String
-  label       String   @default("Casa")
-  calle       String
-  numero      String
-  colonia     String
-  referencias String?
-  lat         Float?
-  lng         Float?
-  isDefault   Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id             String   @id @default(cuid())
+  userId         String
+  label          String   @default("Casa")
+  calle          String
+  numero         String?
+  numeroInterior String?
+  colonia        String
+  referencias    String?
+  lat            Float?
+  lng            Float?
+  isDefault      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

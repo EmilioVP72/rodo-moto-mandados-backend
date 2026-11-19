@@ -692,18 +692,23 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const schema = z.object({
       label: z.string().trim().min(1).max(60).default('Casa'),
       calle: z.string().trim().min(2).max(160),
-      numero: z.string().trim().min(1).max(40),
+      numero: z.string().trim().max(40).nullable().optional(),
+      numeroInterior: z.string().trim().max(40).nullable().optional(),
       colonia: z.string().trim().min(2).max(120),
-      referencias: z.string().trim().max(300).optional(),
-      lat: z.number().optional(),
-      lng: z.number().optional(),
+      referencias: z.string().trim().max(300).nullable().optional(),
+      lat: z.number().nullable().optional(),
+      lng: z.number().nullable().optional(),
       isDefault: z.boolean().optional(),
     });
 
     const parsed = schema.safeParse(request.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: 'Completa calle, número y colonia.' });
+      return reply.status(400).send({ error: 'Completa al menos la calle y la colonia.' });
     }
+
+    const cleanNumero = parsed.data.numero?.trim() || null;
+    const cleanNumeroInterior = parsed.data.numeroInterior?.trim() || null;
+    const cleanReferencias = parsed.data.referencias?.trim() || null;
 
     const userId = request.authUser!.sub;
     const created = await prisma.$transaction(async (tx) => {
@@ -718,9 +723,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           userId,
           label: parsed.data.label,
           calle: parsed.data.calle,
-          numero: parsed.data.numero,
+          numero: cleanNumero,
+          numeroInterior: cleanNumeroInterior,
           colonia: parsed.data.colonia,
-          referencias: parsed.data.referencias || null,
+          referencias: cleanReferencias,
           lat: parsed.data.lat ?? null,
           lng: parsed.data.lng ?? null,
           isDefault: Boolean(parsed.data.isDefault),
