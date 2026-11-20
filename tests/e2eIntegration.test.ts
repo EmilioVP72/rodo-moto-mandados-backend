@@ -359,6 +359,23 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
     assert.equal(adminOrders.status, 200);
     assert.ok(adminOrders.data.some((o: any) => o.id === orderAId));
 
+    // Verificar que el Histórico de Pedidos es EXCLUSIVO para Admin (403 para clientes, 200 para Admin)
+    const forbiddenHistory = await e2eFetch('/api/admin/orders/history', {
+      headers: { Authorization: `Bearer ${customerBToken}` },
+    });
+    assert.equal(forbiddenHistory.status, 403);
+
+    const adminHistory = await e2eFetch(
+      `/api/admin/orders/history?search=${encodeURIComponent(`RD-ISO-${runId}`)}`,
+      {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      }
+    );
+    assert.equal(adminHistory.status, 200);
+    assert.ok(Array.isArray(adminHistory.data.orders));
+    assert.ok(adminHistory.data.orders.some((o: any) => o.id === orderAId));
+    assert.ok(adminHistory.data.summary.totalCount >= 1);
+
     const enableRain = await e2eFetch('/api/settings', {
       method: 'PUT',
       headers: { Authorization: `Bearer ${adminToken}` },

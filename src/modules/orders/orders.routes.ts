@@ -99,6 +99,137 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // =========================================================================
+  // 1.5 REGISTRO HISTÓRICO COMPLETO DE PEDIDOS (EXCLUSIVO ADMINISTRADOR)
+  // =========================================================================
+  app.get('/api/admin/orders/history', { preHandler: [requireAdmin] }, async (request, reply) => {
+    const {
+      search,
+      status,
+      paymentMethod,
+      orderType,
+      rider,
+      dateFrom,
+      dateTo,
+      archivedOnly,
+      limit = '1000',
+    } = request.query as {
+      search?: string;
+      status?: string;
+      paymentMethod?: string;
+      orderType?: string;
+      rider?: string;
+      dateFrom?: string;
+      dateTo?: string;
+      archivedOnly?: string;
+      limit?: string;
+    };
+
+    const takeCount = Math.min(2000, Math.max(1, parseInt(limit, 10) || 1000));
+    const where: Record<string, any> = {};
+
+    if (status && status !== 'todos') {
+      if (status === 'activos') {
+        where.status = { notIn: ['entregado', 'cancelado', 'cancelado_con_deuda'] };
+      } else if (status === 'cancelados_todos') {
+        where.status = { in: ['cancelado', 'cancelado_con_deuda'] };
+      } else {
+        where.status = status;
+      }
+    }
+
+    if (paymentMethod && paymentMethod !== 'todos') {
+      where.paymentMethod = paymentMethod;
+    }
+
+    if (orderType && orderType !== 'todos') {
+      where.orderType = orderType;
+    }
+
+    if (rider && rider !== 'todos') {
+      if (rider === 'sin_asignar') {
+        where.assignedRiderName = null;
+      } else {
+        where.assignedRiderName = { equals: rider, mode: 'insensitive' };
+      }
+    }
+
+    const createdAtFilter: Record<string, Date> = {};
+    if (dateFrom) {
+      const fromDate = new Date(`${dateFrom}T00:00:00.000Z`);
+      if (!Number.isNaN(fromDate.getTime())) createdAtFilter.gte = fromDate;
+    }
+    if (dateTo) {
+      const toDate = new Date(`${dateTo}T23:59:59.999Z`);
+      if (!Number.isNaN(toDate.getTime())) createdAtFilter.lte = toDate;
+    }
+    if (archivedOnly === 'true') {
+      createdAtFilter.lt = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    }
+    if (Object.keys(createdAtFilter).length > 0) {
+      where.createdAt = createdAtFilter;
+    }
+
+    if (search && search.trim()) {
+      const term = search.trim();
+      where.OR = [
+        { folio: { contains: term, mode: 'insensitive' } },
+        { customerName: { contains: term, mode: 'insensitive' } },
+        { customerPhone: { contains: term, mode: 'insensitive' } },
+        { restaurantName: { contains: term, mode: 'insensitive' } },
+        { deliveryAddress: { contains: term, mode: 'insensitive' } },
+        { assignedRiderName: { contains: term, mode: 'insensitive' } },
+      ];
+    }
+
+    const rows = await prisma.order.findMany({
+      where,
+      include: {
+        items: true,
+        statusHistory: { orderBy: { createdAt: 'asc' } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: takeCount,
+    });
+
+    const mapped = rows.map(mapOrderRowToPayload);
+    const cutoff24h = Date.now() - 24 * 60 * 60 * 1000;
+    const summary = mapped.reduce(
+      (acc, order: any) => {
+        const isCancelled =
+          order.status === 'cancelado' || order.status === 'cancelado_con_deuda';
+        if (new Date(order.createdAt).getTime() < cutoff24h) acc.archivedCount += 1;
+        if (order.status === 'entregado') acc.deliveredCount += 1;
+        else if (isCancelled) acc.cancelledCount += 1;
+        else acc.activeCount += 1;
+
+        if (!isCancelled) {
+          const total = Number(order.total || 0);
+          acc.totalRevenue += total;
+          acc.totalDeliveryFees += Number(order.deliveryFee || 0);
+          acc.totalCommissions += Number(order.commissionAmount || 0);
+          if (order.paymentMethod === 'transferencia') acc.transferTotal += total;
+          else acc.cashTotal += total;
+        }
+        return acc;
+      },
+      {
+        totalCount: mapped.length,
+        deliveredCount: 0,
+        cancelledCount: 0,
+        activeCount: 0,
+        archivedCount: 0,
+        totalRevenue: 0,
+        totalDeliveryFees: 0,
+        totalCommissions: 0,
+        cashTotal: 0,
+        transferTotal: 0,
+      }
+    );
+
+    return reply.send({ orders: mapped, summary });
+  });
+
+  // =========================================================================
   // 2. OBTENER DETALLE DE UNA ORDEN POR ID O FOLIO (SOLO DUEÑO O ADMIN)
   // =========================================================================
   app.get('/api/orders/:id', { preHandler: [requireAuth] }, async (request, reply) => {
