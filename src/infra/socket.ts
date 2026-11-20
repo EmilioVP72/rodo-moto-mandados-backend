@@ -7,6 +7,14 @@ import { verifyAuthToken } from '../middlewares/auth.js';
 
 let io: SocketIOServer | null = null;
 
+function leaveAllPrivateRooms(socket: Socket): void {
+  for (const room of socket.rooms) {
+    if (room.startsWith('room:')) {
+      socket.leave(room);
+    }
+  }
+}
+
 export function initSocketServer(httpServer: HttpServer): SocketIOServer {
   io = new SocketIOServer(httpServer, {
     cors: {
@@ -31,21 +39,32 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
 
     if (verifiedUser) {
       socket.data.user = verifiedUser;
-      socket.join(`room:customer:${verifiedUser.sub}`);
       if (verifiedUser.role === 'ADMIN') {
         socket.join('room:admin');
+      } else {
+        socket.join(`room:customer:${verifiedUser.sub}`);
       }
     }
 
-    // Permite autenticar el socket después de hacer login sin recrear la conexión
+    // Permite autenticar o cambiar de cuenta en el socket limpiando SIEMPRE las salas previas
     socket.on('auth:identify', (token: string) => {
+      leaveAllPrivateRooms(socket);
+      socket.data.user = undefined;
+
       const user = typeof token === 'string' ? verifyAuthToken(token) : null;
       if (!user) return;
       socket.data.user = user;
-      socket.join(`room:customer:${user.sub}`);
       if (user.role === 'ADMIN') {
         socket.join('room:admin');
+      } else {
+        socket.join(`room:customer:${user.sub}`);
       }
+    });
+
+    // Limpieza explícita de salas al cerrar sesión para evitar fugas entre roles/usuarios
+    socket.on('auth:logout', () => {
+      leaveAllPrivateRooms(socket);
+      socket.data.user = undefined;
     });
 
     socket.on('join:order', async (orderIdOrFolio: string) => {
