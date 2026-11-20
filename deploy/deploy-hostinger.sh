@@ -4,7 +4,8 @@ set -euo pipefail
 # ==============================================================================
 # RODO MOTO MANDADOS · SCRIPT DE DESPLIEGUE AUTOMATIZADO PARA VPS HOSTINGER
 # Compatible con Ubuntu 22.04 / 24.04 LTS y Debian 12
-# Reutiliza el contenedor PostgreSQL 16 existente (ej. rodo-db-1) sin duplicarlo
+# - Reutiliza el contenedor PostgreSQL 16 existente (ej. rodo-db-1)
+# - NO toca los puertos 80 ni 443 (expone la app en WEB_PORT, default 8080)
 # ==============================================================================
 
 BACKEND_REPO="https://github.com/EmilioVP72/rodo-moto-mandados-backend.git"
@@ -13,7 +14,8 @@ DEFAULT_PG_CONTAINER="${POSTGRES_CONTAINER:-rodo-db-1}"
 
 echo "========================================================================"
 echo "  RODO Moto Mandados · Despliegue Produccion (Hostinger VPS)"
-echo "  Modo: Reutilizar contenedor PostgreSQL 16 existente (${DEFAULT_PG_CONTAINER})"
+echo "  - PostgreSQL existente: ${DEFAULT_PG_CONTAINER} (sin duplicar Postgres)"
+echo "  - Puerto dedicado (respeta tus puertos 80 y 443 ocupados)"
 echo "========================================================================"
 
 # 1. Verificar Docker y Docker Compose Plugin
@@ -26,19 +28,8 @@ else
   echo "[1/6] Docker detectado: $(docker --version)"
 fi
 
-# 2. Configurar Firewall UFW (Solo SSH 22, HTTP 80, HTTPS 443)
-if command -v ufw >/dev/null 2>&1; then
-  echo "[2/6] Verificando reglas seguras de Firewall UFW..."
-  ufw allow 22/tcp >/dev/null || true
-  ufw allow 80/tcp >/dev/null || true
-  ufw allow 443/tcp >/dev/null || true
-  ufw allow 443/udp >/dev/null || true
-else
-  echo "[2/6] UFW no detectado (asegurate de abrir puertos 80 y 443 en Hostinger)."
-fi
-
-# 3. Clonar o actualizar los repositorios de Backend y Frontend desde GitHub
-echo "[3/6] Sincronizando repositorios desde GitHub..."
+# 2. Clonar o actualizar los repositorios de Backend y Frontend desde GitHub
+echo "[2/6] Sincronizando repositorios desde GitHub..."
 if [ -d "backend/.git" ]; then
   git -C backend pull --ff-only origin main
 else
@@ -55,13 +46,11 @@ fi
 
 # Asegurar que los archivos de despliegue en la raiz coincidan con backend/deploy
 cp -f backend/deploy/docker-compose.prod.yml ./docker-compose.prod.yml
-cp -f backend/deploy/Caddyfile ./Caddyfile
 cp -f backend/deploy/.env.example ./.env.example
 
-# 4. Detectar contenedor PostgreSQL 16 existente y su red Docker
-echo "[4/6] Verificando contenedor PostgreSQL 16 existente..."
+# 3. Detectar contenedor PostgreSQL 16 existente y su red Docker
+echo "[3/6] Verificando contenedor PostgreSQL 16 existente..."
 if [ -f ".env" ]; then
-  # Cargar valores existentes si ya hay .env
   set -a
   # shellcheck disable=SC1091
   source .env
@@ -81,7 +70,7 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
 fi
 echo "    -> Contenedor PostgreSQL encontrado y activo: $PG_CONTAINER"
 
-# Detectar red definida por usuario (la red 'bridge' por defecto NO resuelve nombres de contenedor por DNS)
+# Detectar red definida por usuario (la red 'bridge' por defecto NO resuelve nombres por DNS)
 DETECTED_NET="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{if ne $k "bridge"}}{{$k}} {{end}}{{end}}' "$PG_CONTAINER" | awk '{print $1}')"
 if [ -z "$DETECTED_NET" ]; then
   DETECTED_NET="rodo-shared-pg"
@@ -92,12 +81,14 @@ else
   echo "    -> Red Docker compartida detectada automaticamente: $DETECTED_NET"
 fi
 
-# 5. Generar archivo .env seguro si no existe (o actualizar POSTGRES_NETWORK si falto)
+# 4. Generar archivo .env seguro si no existe
 if [ ! -f ".env" ]; then
-  echo "[5/6] Generando archivo .env de produccion..."
-  read -r -p "Ingresa tu dominio apuntado al VPS (ej. rodomotomandados.com, o deja vacio para probar por IP en puerto 80): " USER_DOMAIN
+  echo "[4/6] Generando archivo .env de produccion..."
+  read -r -p "Puerto HTTP libre en tu VPS para RODO (no usa 80 ni 443) [8080]: " USER_WEB_PORT
+  USER_WEB_PORT="${USER_WEB_PORT:-8080}"
+
+  read -r -p "Dominio publico para CORS (ej. rodomotomandados.com, o deja vacio para permitir todos '*'): " USER_DOMAIN
   if [ -z "$USER_DOMAIN" ]; then
-    USER_DOMAIN=":80"
     CORS_VALUE="*"
   else
     CORS_VALUE="https://${USER_DOMAIN},https://www.${USER_DOMAIN}"
@@ -120,9 +111,7 @@ if [ ! -f ".env" ]; then
   JWT_KEY="$(openssl rand -hex 32)"
 
   cat > .env <<EOF
-DOMAIN=${USER_DOMAIN}
-HTTP_PORT=80
-HTTPS_PORT=443
+WEB_PORT=${USER_WEB_PORT}
 
 POSTGRES_CONTAINER=${PG_CONTAINER}
 POSTGRES_HOST=${PG_CONTAINER}
@@ -147,7 +136,10 @@ EOF
   source .env
   set +a
 else
-  echo "[5/6] Usando archivo .env existente."
+  echo "[4/6] Usando archivo .env existente."
+  if ! grep -q '^WEB_PORT=' .env; then
+    echo "WEB_PORT=8080" >> .env
+  fi
   if ! grep -q '^POSTGRES_NETWORK=' .env; then
     echo "POSTGRES_NETWORK=${DETECTED_NET}" >> .env
   fi
@@ -156,8 +148,8 @@ else
   fi
 fi
 
-# 5.5 Crear usuario y base de datos de forma segura e idempotente dentro del Postgres existente
-echo "    -> Creando/verificando usuario '${POSTGRES_USER}' y base de datos '${POSTGRES_DB}' en '${PG_CONTAINER}'..."
+# 5. Crear usuario y base de datos de forma segura e idempotente dentro del Postgres existente
+echo "[5/6] Creando/verificando usuario '${POSTGRES_USER}' y base de datos '${POSTGRES_DB}' en '${PG_CONTAINER}'..."
 PG_SUPERUSER="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$PG_CONTAINER" | awk -F= '$1=="POSTGRES_USER"{print $2}' | head -n1)"
 PG_SUPERUSER="${PG_SUPERUSER:-postgres}"
 
@@ -187,17 +179,20 @@ docker exec "$PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U "$PG_SUPERUSER" -d "${POS
   -c "ALTER SCHEMA public OWNER TO \"${POSTGRES_USER}\";" \
   -c "GRANT ALL ON SCHEMA public TO \"${POSTGRES_USER}\";"
 
-# 6. Compilar y desplegar stack de produccion (sin levantar un segundo Postgres)
-echo "[6/6] Compilando e iniciando contenedores de produccion (rodo-redis, rodo-api, rodo-web, rodo-proxy, rodo-backup)..."
+# 6. Compilar y desplegar stack de produccion (sin tocar 80/443 ni duplicar Postgres)
+echo "[6/6] Compilando e iniciando contenedores de produccion (rodo-redis, rodo-api, rodo-web, rodo-backup)..."
 mkdir -p backups/postgres
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
 
 echo ""
 echo "========================================================================"
-echo "  DESPLIEGUE COMPLETADO EXITOSAMENTE"
+echo "  DESPLIEGUE COMPLETADO EXITOSAMENTE (Puerto host: ${WEB_PORT:-8080})"
 echo "========================================================================"
 docker compose -f docker-compose.prod.yml ps
 echo ""
 echo "Verificacion rapida:"
+echo "  curl -s http://127.0.0.1:${WEB_PORT:-8080}/api/health"
 echo "  docker compose -f docker-compose.prod.yml logs -f rodo-api"
-echo "  curl -s http://127.0.0.1:${HTTP_PORT:-80}/api/health"
+echo ""
+echo "Para publicarlo con tu proxy principal (puertos 80/443):"
+echo "  Apunta tu dominio hacia http://127.0.0.1:${WEB_PORT:-8080} (activa soporte WebSockets para /socket.io/)."

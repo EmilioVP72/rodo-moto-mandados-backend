@@ -1,7 +1,8 @@
 # ==============================================================================
-# RODO MOTO MANDADOS · PRODUCCIÓN HOSTINGER VPS (SIN POSTGRES DUPLICADO)
-# Se conecta al contenedor PostgreSQL 16 existente en tu VPS (ej. rodo-db-1)
-# a través de su red Docker externa (${POSTGRES_NETWORK}).
+# RODO MOTO MANDADOS · PRODUCCIÓN HOSTINGER VPS (SIN CONFLICTOS EN 80/443)
+# - Reutiliza tu contenedor PostgreSQL 16 existente (ej. rodo-db-1)
+# - Expone la app (Nginx + API + WebSockets) en WEB_PORT (por defecto 8080)
+#   para no chocar con los puertos 80 y 443 ya ocupados en tu VPS.
 # ==============================================================================
 services:
   rodo-redis:
@@ -42,7 +43,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET es obligatorio en produccion}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-edsoncruz14999@gmail.com}
       ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:?ADMIN_INITIAL_PASSWORD es obligatorio en produccion}
-      CORS_ORIGIN: ${CORS_ORIGIN:-https://${DOMAIN:-localhost}}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
       UPLOADS_DIR: /app/uploads
     volumes:
       - rodo_uploads:/app/uploads
@@ -60,6 +61,8 @@ services:
       - rodo-internal
       - existing-postgres
 
+  # Nginx sirve la PWA React y hace proxy interno a /api, /socket.io y /uploads
+  # Apunta tu proxy principal (puertos 80/443) hacia http://127.0.0.1:${WEB_PORT:-8080}
   rodo-web:
     build:
       context: ./frontend
@@ -69,39 +72,13 @@ services:
     depends_on:
       rodo-api:
         condition: service_healthy
+    ports:
+      - "${WEB_PORT:-8080}:80"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/api/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    networks:
-      - rodo-internal
-
-  # Proxy TLS con certificado SSL Let's Encrypt automático (HTTPS obligatorio para GPS y PWA)
-  rodo-proxy:
-    image: caddy:2-alpine
-    container_name: rodo-proxy
-    restart: always
-    depends_on:
-      rodo-web:
-        condition: service_healthy
-      rodo-api:
-        condition: service_healthy
-    environment:
-      DOMAIN: ${DOMAIN:-:80}
-    ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
-      - "${HTTPS_PORT:-443}:443/udp"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - rodo_caddy_data:/data
-      - rodo_caddy_config:/config
     logging:
       driver: "json-file"
       options:
@@ -151,8 +128,6 @@ services:
 volumes:
   rodo_redisdata:
   rodo_uploads:
-  rodo_caddy_data:
-  rodo_caddy_config:
 
 networks:
   rodo-internal:
