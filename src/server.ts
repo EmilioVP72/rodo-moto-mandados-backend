@@ -21,12 +21,18 @@ import { uploadsRoutes } from './modules/uploads/uploads.routes.js';
 async function bootstrap() {
   const app = Fastify({
     logger: env.NODE_ENV === 'development',
+    trustProxy: true,
     bodyLimit: 8 * 1024 * 1024, // 8 MB para permitir imágenes de evidencia o catálogos
   });
 
   // 1. Plugins de Seguridad y Red
   await app.register(cors, {
-    origin: env.CORS_ORIGIN === '*' ? true : env.CORS_ORIGIN.split(','),
+    origin:
+      env.CORS_ORIGIN === '*'
+        ? true
+        : env.CORS_ORIGIN.split(',')
+            .map((o) => o.trim())
+            .filter(Boolean),
     credentials: true,
   });
 

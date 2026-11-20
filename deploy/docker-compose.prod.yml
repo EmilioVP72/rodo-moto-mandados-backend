@@ -1,27 +1,9 @@
+# ==============================================================================
+# RODO MOTO MANDADOS · PRODUCCIÓN HOSTINGER VPS (SIN POSTGRES DUPLICADO)
+# Se conecta al contenedor PostgreSQL 16 existente en tu VPS (ej. rodo-db-1)
+# a través de su red Docker externa (${POSTGRES_NETWORK}).
+# ==============================================================================
 services:
-  rodo-db:
-    image: postgres:16-alpine
-    container_name: rodo-db
-    restart: always
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-rodo_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio en produccion}
-      POSTGRES_DB: ${POSTGRES_DB:-rodo_db}
-    volumes:
-      - rodo_pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rodo_user} -d ${POSTGRES_DB:-rodo_db}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    networks:
-      - rodo-internal
-
   rodo-redis:
     image: redis:7-alpine
     container_name: rodo-redis
@@ -49,20 +31,18 @@ services:
     container_name: rodo-api
     restart: always
     depends_on:
-      rodo-db:
-        condition: service_healthy
       rodo-redis:
         condition: service_healthy
     environment:
       NODE_ENV: production
       PORT: 4000
       HOST: 0.0.0.0
-      DATABASE_URL: postgresql://${POSTGRES_USER:-rodo_user}:${POSTGRES_PASSWORD}@rodo-db:5432/${POSTGRES_DB:-rodo_db}?schema=public
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rodo_user}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio en produccion}@${POSTGRES_HOST:-rodo-db-1}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-rodo_db}?schema=public
       REDIS_URL: redis://rodo-redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET es obligatorio en produccion}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-edsoncruz14999@gmail.com}
       ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:?ADMIN_INITIAL_PASSWORD es obligatorio en produccion}
-      CORS_ORIGIN: https://${DOMAIN:-localhost}
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://${DOMAIN:-localhost}}
       UPLOADS_DIR: /app/uploads
     volumes:
       - rodo_uploads:/app/uploads
@@ -78,6 +58,7 @@ services:
         max-file: "5"
     networks:
       - rodo-internal
+      - existing-postgres
 
   rodo-web:
     build:
@@ -112,11 +93,11 @@ services:
       rodo-api:
         condition: service_healthy
     environment:
-      DOMAIN: ${DOMAIN:-localhost}
+      DOMAIN: ${DOMAIN:-:80}
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - rodo_caddy_data:/data
@@ -129,18 +110,16 @@ services:
     networks:
       - rodo-internal
 
-  # Respaldo automático diario de PostgreSQL con retención de 14 días
+  # Respaldo automático diario de la BD rodo_db alojada en el Postgres existente (retención 14 días)
   rodo-backup:
     image: postgres:16-alpine
     container_name: rodo-backup
     restart: always
-    depends_on:
-      rodo-db:
-        condition: service_healthy
     environment:
-      PGHOST: rodo-db
+      PGHOST: ${POSTGRES_HOST:-rodo-db-1}
+      PGPORT: ${POSTGRES_PORT:-5432}
       PGUSER: ${POSTGRES_USER:-rodo_user}
-      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio en produccion}
       PGDATABASE: ${POSTGRES_DB:-rodo_db}
       BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
     volumes:
@@ -149,10 +128,14 @@ services:
       - /bin/sh
       - -c
       - |
-        echo "[RODO Backup] Servicio de respaldos diarios iniciado (retencion: $${BACKUP_KEEP_DAYS} dias)"
+        echo "[RODO Backup] Respaldos diarios activos contra $${PGHOST}:$${PGPORT}/$${PGDATABASE} (retencion: $${BACKUP_KEEP_DAYS} dias)"
         while true; do
           TS=$$(date +%Y%m%d_%H%M%S)
-          pg_dump | gzip > "/backups/rodo_db_$${TS}.sql.gz" && echo "[RODO Backup] Respaldo creado: rodo_db_$${TS}.sql.gz"
+          if pg_dump | gzip > "/backups/$${PGDATABASE}_$${TS}.sql.gz"; then
+            echo "[RODO Backup] Respaldo creado: $${PGDATABASE}_$${TS}.sql.gz"
+          else
+            echo "[RODO Backup] Advertencia: fallo temporal en pg_dump, reintentara en el siguiente ciclo"
+          fi
           find /backups -type f -name "*.sql.gz" -mtime +$${BACKUP_KEEP_DAYS} -delete
           sleep 86400
         done
@@ -163,9 +146,9 @@ services:
         max-file: "2"
     networks:
       - rodo-internal
+      - existing-postgres
 
 volumes:
-  rodo_pgdata:
   rodo_redisdata:
   rodo_uploads:
   rodo_caddy_data:
@@ -174,3 +157,6 @@ volumes:
 networks:
   rodo-internal:
     driver: bridge
+  existing-postgres:
+    external: true
+    name: ${POSTGRES_NETWORK:?Define POSTGRES_NETWORK con el nombre de la red Docker de tu contenedor Postgres (ej. rodo_default)}
