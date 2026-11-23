@@ -21,10 +21,10 @@ export async function ridersRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/admin/riders', { preHandler: [requireAdmin] }, async (request, reply) => {
     const schema = z.object({
-      name: z.string().trim().min(2).max(120),
-      email: z.string().trim().email().max(254),
-      phone: z.string().trim().min(8).max(32),
-      password: z.string().min(8).max(128),
+      name: z.string().trim().min(2, 'El nombre del repartidor debe tener al menos 2 caracteres.').max(120),
+      email: z.string().trim().email('Ingresa un correo electrónico válido.').max(254),
+      phone: z.string().trim().min(8, 'El teléfono debe tener al menos 8 dígitos.').max(32),
+      password: z.string().min(8, 'La contraseña debe tener al menos 8 caracteres.').max(128),
     });
     const parsed = schema.safeParse(request.body);
     if (!parsed.success) {
@@ -32,19 +32,24 @@ export async function ridersRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const email = parsed.data.email.toLowerCase();
+    const phone = parsed.data.phone.trim();
     const duplicate = await prisma.user.findFirst({
-      where: { OR: [{ email }, { phone: parsed.data.phone }] },
-      select: { id: true },
+      where: { OR: [{ email }, { phone }] },
+      select: { id: true, email: true, phone: true },
     });
     if (duplicate) {
-      return reply.status(409).send({ error: 'El correo o teléfono ya está vinculado a una cuenta.' });
+      const reason =
+        duplicate.email === email
+          ? 'Ese correo electrónico ya está vinculado a otra cuenta.'
+          : 'Ese número de teléfono ya está vinculado a otra cuenta.';
+      return reply.status(409).send({ error: reason });
     }
 
     const rider = await prisma.user.create({
       data: {
         name: parsed.data.name,
         email,
-        phone: parsed.data.phone,
+        phone,
         passwordHash: await bcrypt.hash(parsed.data.password, riderPasswordRounds),
         role: 'RIDER',
         status: 'activo',
