@@ -16,7 +16,7 @@ import {
   extractUserFromRequest,
 } from '../../middlewares/auth.js';
 import { emitAdminEvent } from '../../infra/socket.js';
-import { verifyIneDigitsServer } from '../../utils/domainRules.js';
+import { verifyIneDigitsServer, getServerCustomerCashLimit } from '../../utils/domainRules.js';
 import {
   prepareIneForStorage,
   maskIneDigits,
@@ -71,6 +71,7 @@ function serializeUserAccount(user: any) {
     blockedAt:
       user.blockedAt instanceof Date ? user.blockedAt.toISOString() : user.blockedAt || undefined,
     completedOrdersCount: user.completedOrdersCount,
+    cashLimit: getServerCustomerCashLimit(user.completedOrdersCount),
     referralCode: user.referralCode || undefined,
     referredByCode: user.referredByCode || undefined,
     referralRewardsCount: user.referralRewardsCount,
