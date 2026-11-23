@@ -310,12 +310,15 @@ model BroadcastNotification {
   message         String
   promoCode       String?
   scheduledFor    String?
+  publishAt       DateTime?
+  publishedAt     DateTime?
   sendImmediately Boolean  @default(true)
   sentBy          String
   createdAt       String
   storedAt        DateTime @default(now())
 
   @@index([storedAt(sort: Desc)])
+  @@index([publishedAt, publishAt])
   @@map("broadcast_notifications")
 }
 
