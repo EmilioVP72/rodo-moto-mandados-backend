@@ -1,3 +1,4 @@
+import { recoveryMessage, recoveryReceipt, resetMailTransport } from '../../infra/resetMail.js';
 import { saveImage } from '../uploads/storage.js';
 import { FastifyInstance } from 'fastify';
 import bcrypt from 'bcryptjs';
@@ -480,7 +481,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   // =========================================================================
   // 4. RECUPERACIÓN REAL DE CONTRASEÑA (FORGOT PASSWORD -> 6-DIGIT CODE -> RESET)
   // =========================================================================
-  app.post('/api/auth/forgot-password', async (request, reply) => {
+  app.post('/api/auth/forgot-password', { config: { rateLimit: { max: 8, timeWindow: '15 minutes' } } }, async (request, reply) => {
     const schema = z.object({
       email: z.string().trim().email('Ingresa un correo electrónico válido.'),
     });
@@ -490,46 +491,25 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: parsed.error.issues[0]?.message || 'Correo inválido.' });
     }
 
-    const cleanEmail = parsed.data.email.toLowerCase();
-    const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
-
-    // Respuesta uniforme anti-enumeración si el correo no existe
-    if (!user) {
-      return reply.send({
-        ok: true,
-        message:
-          'Si el correo existe en RODO Moto Mandados, generamos un código de verificación de 6 dígitos válido por 15 minutos.',
-      });
+    const mail = resetMailTransport();
+    if (!mail) return reply.code(503).send({ error: 'La recuperación por correo está temporalmente fuera de servicio.' });
+    const user = await prisma.user.findUnique({ where: { email: parsed.data.email.toLowerCase() } });
+    if (!user) return reply.send(recoveryReceipt);
+    const code = generateSixDigitResetCode();
+    const token = await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${user.id} FOR UPDATE`;
+      await tx.passwordResetToken.updateMany({ where: { userId: user.id, usedAt: null }, data: { usedAt: new Date() } });
+      return tx.passwordResetToken.create({ data: {
+        userId: user.id, codeHash: hashSecretSha256(code), expiresAt: new Date(Date.now() + 900000),
+      } });
+    });
+    try {
+      await mail.sendMail(recoveryMessage(user.email, code, process.env.SMTP_FROM!));
+    } catch {
+      console.error('[Correo] Falló la entrega de un código de recuperación.');
+      await prisma.passwordResetToken.update({ where: { id: token.id }, data: { usedAt: new Date() } });
     }
-
-    // Invalidar códigos previos sin usar del mismo usuario
-    await prisma.passwordResetToken.updateMany({
-      where: { userId: user.id, usedAt: null },
-      data: { usedAt: new Date() },
-    });
-
-    const resetCode = generateSixDigitResetCode();
-    const codeHash = hashSecretSha256(resetCode);
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutos
-
-    await prisma.passwordResetToken.create({
-      data: {
-        userId: user.id,
-        codeHash,
-        expiresAt,
-      },
-    });
-
-    const hasSmtpConfigured = Boolean(process.env.SMTP_HOST);
-
-    return reply.send({
-      ok: true,
-      message:
-        'Código de recuperación generado. Tienes 15 minutos para ingresar el código de 6 dígitos y establecer tu nueva contraseña.',
-      expiresInMinutes: 15,
-      // Cuando aún no hay servidor SMTP externo configurado, devolvemos el código para pruebas/autoservicio
-      ...(!hasSmtpConfigured ? { deliveryMode: 'local_preview', resetCodePreview: resetCode } : {}),
-    });
+    return reply.send(recoveryReceipt);
   });
 
   app.post('/api/auth/reset-password', async (request, reply) => {
@@ -587,11 +567,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     // Transacción atómica: actualizar contraseña + quemar token + revocar todas las sesiones anteriores
     const updatedUser = await prisma.$transaction(async (tx) => {
-      await tx.passwordResetToken.update({
-        where: { id: latestToken.id },
+      const claimed = await tx.passwordResetToken.updateMany({
+        where: { id: latestToken.id, usedAt: null, attempts: { lt: 5 }, expiresAt: { gt: now } },
         data: { usedAt: now },
       });
 
+      if (!claimed.count) return null;
       await tx.refreshSession.updateMany({
         where: { userId: user.id, revokedAt: null },
         data: { revokedAt: now },
@@ -604,6 +585,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       });
     });
 
+    if (!updatedUser) return reply.code(400).send({ error: 'Código inválido o expirado.' });
     const freshSession = await createUserRefreshSession({
       userId: updatedUser.id,
       userAgent: request.headers['user-agent'],

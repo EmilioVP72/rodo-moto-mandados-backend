@@ -45,6 +45,11 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-edsoncruz14999@gmail.com}
       ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:?ADMIN_INITIAL_PASSWORD es obligatorio en produccion}
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
       UPLOADS_DIR: /app/uploads
     volumes:
       - rodo_uploads:/app/uploads

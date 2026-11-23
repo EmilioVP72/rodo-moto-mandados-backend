@@ -270,14 +270,21 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
     assert.equal(addrsOfB.data.length, 0);
   });
 
-  it('6. Recuperación Real de Contraseña (forgot-password -> código 6 dígitos -> reset-password) y revocación de sesiones viejas', async () => {
+  it('6. Recuperación Real de Contraseña (forgot-password -> código 6 dígitos -> reset-password) y revocación de sesiones viejas', { skip: !process.env.E2E_MAILPIT_URL && 'Requiere buzón de prueba Mailpit' }, async () => {
     const forgotRes = await e2eFetch('/api/auth/forgot-password', {
       method: 'POST',
       body: JSON.stringify({ email: emailA }),
     });
     assert.equal(forgotRes.status, 200);
     assert.equal(forgotRes.data.ok, true);
-    assert.match(forgotRes.data.resetCodePreview, /^\d{6}$/);
+    assert.equal(forgotRes.data.resetCodePreview, undefined);
+    const inbox = new URL('/api/v1/messages', process.env.E2E_MAILPIT_URL);
+    const messages = await (await fetch(inbox)).json();
+    const message = messages.messages.find((m: any) => m.To.some((address: any) => address.Address === emailA));
+    assert.ok(message, 'Debe llegar correo a la cuenta de prueba');
+    const mail = await (await fetch(new URL('/api/v1/message/' + message.ID, inbox))).json();
+    const resetCode = mail.Text.match(/\b\d{6}\b/)?.[0];
+    assert.ok(resetCode);
 
     // Código incorrecto debe ser rechazado (400)
     const wrongCodeRes = await e2eFetch('/api/auth/reset-password', {
@@ -295,7 +302,7 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
       method: 'POST',
       body: JSON.stringify({
         email: emailA,
-        code: forgotRes.data.resetCodePreview,
+        code: resetCode,
         newPassword: 'NewPasswordA999!',
       }),
     });
