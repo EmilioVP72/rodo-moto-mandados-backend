@@ -2,7 +2,7 @@ import { Server as HttpServer } from 'http';
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { env } from '../config/env.js';
 import { prisma } from './prisma.js';
-import { validateGpsCoordinates } from '../utils/domainRules.js';
+import { getRiderGpsPing } from '../utils/domainRules.js';
 import { verifyAuthToken } from '../middlewares/auth.js';
 
 let io: SocketIOServer | null = null;
@@ -86,59 +86,31 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
     socket.on(
       'rider:location',
       async (payload: { orderId: string; lat: number; lng: number; riderName?: string }) => {
-        const user = socket.data.user;
-        if (!user || user.role !== 'RIDER') return;
-        if (!payload?.orderId) return;
-        const check = validateGpsCoordinates(payload.lat, payload.lng);
-        if (!check.valid) return;
-
-        if (user.sid) {
-          const session = await prisma.refreshSession.findUnique({
-            where: { id: user.sid },
-            select: { revokedAt: true, expiresAt: true },
-          });
-          if (!session || session.revokedAt || session.expiresAt < new Date()) return;
-        }
-
-        const rider = await prisma.user.findFirst({
-          where: { id: user.sub, role: 'RIDER', status: 'activo' },
-          select: { id: true, name: true },
-        });
-        if (!rider) return;
-
-        const existing = await prisma.order.findFirst({
-          where: { id: String(payload.orderId), assignedRiderUserId: rider.id },
-        });
-        if (!existing) return;
-
-        const nowIso = new Date().toISOString();
-        const locationEvent = {
-          orderId: existing.id,
-          coordinates: { lat: check.lat, lng: check.lng },
-          riderName: rider.name,
-          timestamp: nowIso,
-        };
-
-        // Emitir coordenadas GPS únicamente al dueño de la orden, sala de la orden y admins
-        io?.to('room:admin')
-          .to(`room:customer:${existing.customerId}`)
-          .to(`room:order:${existing.id}`)
-          .emit('order:rider-location', locationEvent);
-
+        const ping = getRiderGpsPing(socket.data.user, payload);
+        if (!ping) return;
+        const { orderId, riderId, sessionId, coordinates } = ping;
+        const timestamp = new Date().toISOString();
         try {
-          const prevPayload = (existing.payload || {}) as Record<string, unknown>;
-          await prisma.order.update({
-            where: { id: existing.id },
-            data: {
-              payload: {
-                ...prevPayload,
-                riderLiveCoordinates: { lat: check.lat, lng: check.lng },
-                riderLastLocationUpdate: nowIso,
-              },
-            },
-          });
+          // La misma escritura comprueba la asignación, el estado y la sesión.
+          const rows = await prisma.$queryRaw<{ customerId: string; riderName: string }[]>`
+            UPDATE orders AS o
+               SET payload = COALESCE(o.payload, '{}'::jsonb) || ${JSON.stringify({
+                 riderLiveCoordinates: coordinates, riderLastLocationUpdate: timestamp,
+               })}::jsonb
+              FROM users AS u, refresh_sessions AS s
+             WHERE o.id = ${orderId} AND o."assignedRiderUserId" = ${riderId}
+               AND o.status IN ('asignado','recolectado','en_camino','afuera_del_domicilio')
+               AND u.id = o."assignedRiderUserId" AND u.role = 'RIDER' AND u.status = 'activo'
+               AND s.id = ${sessionId} AND s."userId" = u.id AND s."revokedAt" IS NULL
+               AND s."expiresAt" > CURRENT_TIMESTAMP
+            RETURNING o."customerId", u.name AS "riderName"
+          `;
+          if (!rows.length) return;
+          const { customerId, riderName } = rows[0];
+          io?.to('room:admin').to(`room:customer:${customerId}`)
+            .emit('order:rider-location', { orderId, riderName, coordinates, timestamp });
         } catch {
-          // Non-blocking DB update for high-frequency GPS pings
+          console.warn('[GPS] No se pudo guardar la ubicación del repartidor.');
         }
       }
     );

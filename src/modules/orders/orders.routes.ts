@@ -327,6 +327,9 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'Datos de la orden incompletos.' });
     }
 
+    delete body.riderLiveCoordinates;
+    delete body.riderLastLocationUpdate;
+
     // 4.1 Verificar pausa por lluvia
     const settingsDoc = await prisma.setting.findUnique({ where: { id: 'general' } });
     const settings = (settingsDoc?.payload || {}) as any;

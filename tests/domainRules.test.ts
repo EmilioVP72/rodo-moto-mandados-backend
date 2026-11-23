@@ -6,6 +6,7 @@ import {
   validateSpeiTrackingKeyFormat,
   recalculateOrderTotalsServer,
   validateGpsCoordinates,
+  getRiderGpsPing,
   canRiderTransitionOrderStatus,
 } from '../src/utils/domainRules.ts';
 
@@ -175,5 +176,21 @@ describe('Backend Domain Rules & Security Unit Tests', () => {
       assert.equal(canRiderTransitionOrderStatus('entregado', 'en_camino'), false);
       assert.equal(canRiderTransitionOrderStatus('nuevo', 'cancelado'), false);
     });
+  });
+});
+
+describe('Autorización del GPS', () => {
+  const rider = { role: 'RIDER', sub: 'moto', sid: 'session', exp: 2 };
+  const point = { orderId: 'order', lat: 20.9, lng: -100.7 };
+  it('exige rol, sesión y token vigente', () => {
+    for (const user of [undefined, { ...rider, role: 'CUSTOMER' }, { ...rider, sid: '' }, { ...rider, exp: 1 }]) {
+      assert.equal(getRiderGpsPing(user, point, 1000), null);
+    }
+  });
+  it('vincula el emisor a su identidad autenticada y valida el pedido y las coordenadas', () => {
+    assert.deepEqual(getRiderGpsPing(rider, point, 1000), { orderId: 'order', riderId: 'moto',
+      sessionId: 'session', coordinates: { lat: 20.9, lng: -100.7 } });
+    assert.equal(getRiderGpsPing(rider, { ...point, lat: [] }, 1000), null);
+    assert.equal(getRiderGpsPing(rider, { ...point, orderId: '' }, 1000), null);
   });
 });

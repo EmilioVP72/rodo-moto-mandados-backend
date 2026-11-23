@@ -216,3 +216,17 @@ export function validateGpsCoordinates(
   };
 }
 
+
+export function getRiderGpsPing(
+  user: { sub?: string; role?: string; sid?: string; exp?: number } | undefined,
+  payload: { orderId?: unknown; lat?: unknown; lng?: unknown } | null,
+  now = Date.now()
+) {
+  if (user?.role !== 'RIDER' || !user.sub || !user.sid || !user.exp || user.exp * 1000 <= now) return null;
+  if (typeof payload?.orderId !== 'string' || !payload.orderId.trim()) return null;
+  if (typeof payload.lat !== 'number' || typeof payload.lng !== 'number') return null;
+  const point = validateGpsCoordinates(payload.lat, payload.lng);
+  if (!point.valid) return null;
+  return { riderId: user.sub, sessionId: user.sid, orderId: payload.orderId,
+    coordinates: { lat: point.lat, lng: point.lng } };
+}
