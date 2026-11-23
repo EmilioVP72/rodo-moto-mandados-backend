@@ -5,8 +5,11 @@ import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
 import {
   getServerCustomerCashLimit,
   validateSpeiTrackingKeyFormat,
-  recalculateOrderTotalsServer,
+
 } from '../../utils/domainRules.js';
+
+import { quoteExpressDelivery } from '../routing/routing.routes.js';
+import { initialOrderPayment, money, priceFoodOrder, priceFuelRequest, PriceError } from '../../utils/orderPricing.js';
 
 const CUSTOMER_ALLOWED_PATCH_FIELDS = new Set([
   'receptionConfirmed',
@@ -272,7 +275,6 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     };
 
     const senderBank = (body?.senderBank || 'SPEI Interbancario').trim();
-    const expectedAmount = Math.max(0, Number(body?.expectedAmount) || 0);
 
     const formatCheck = validateSpeiTrackingKeyFormat(body?.trackingKey || '');
     const cleanKey = formatCheck.cleanKey;
@@ -300,21 +302,8 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const now = new Date();
-    const authCode = `${now.getHours().toString().padStart(2, '0')}${now.getMinutes().toString().padStart(2, '0')}-${cleanKey.slice(-4)}`;
-
-    return reply.send({
-      trackingKey: cleanKey,
-      senderBank,
-      verified: true,
-      verifiedAt: now.toLocaleTimeString('es-MX', {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      }),
-      verifiedAmount: expectedAmount,
-      statusMessage: `Referencia SPEI #${cleanKey} registrada por $${expectedAmount.toFixed(2)} MXN (${senderBank} · Folio Auditoría #${authCode}).`,
-    });
+    return reply.send({ trackingKey: cleanKey, senderBank, verified: false, referenceAvailable: true,
+      statusMessage: 'Referencia disponible. Despacho confirmará el depósito.' });
   });
 
   // =========================================================================
@@ -367,38 +356,63 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     }
 
     // 4.3 Verificar restaurante en PostgreSQL y recalcular subtotal oficial
-    const items = Array.isArray(body.items) ? body.items : [];
-    const isStandardFoodOrder =
-      !body.isCustomQuote &&
-      body.orderType !== 'auxilio_gasolina' &&
-      body.orderType !== 'solicitud_local' &&
-      body.orderType !== 'envio';
-
+    const kind = body.orderType || 'comida';
+    const isStandardFoodOrder = kind === 'comida';
     const restaurantDoc = body.restaurantId
-      ? await prisma.restaurant.findUnique({ where: { id: String(body.restaurantId) } })
-      : null;
-
-    if (isStandardFoodOrder && restaurantDoc && (!restaurantDoc.isActive || !restaurantDoc.isOpen)) {
-      const restPayload = (restaurantDoc.payload || {}) as any;
-      return reply.status(409).send({
-        error: `🚫 El establecimiento "${restaurantDoc.name}" acaba de cerrar sus pedidos (${restPayload.closureReason || 'cierre temporal'}).`,
-      });
+      ? await prisma.restaurant.findUnique({ where: { id: String(body.restaurantId) } }) : null;
+    const menu = (restaurantDoc?.payload || {}) as any;
+    let items = Array.isArray(body.items) ? body.items : [];
+    let subtotal = 0, deliveryFee = 0, total = 0, commissionAmount = 0;
+    let tipAmount = 0, promoDiscountApplied = 0;
+    const quoted = ['pedido_personalizado', 'local_no_encontrado', 'auxilio_gasolina'].includes(kind);
+    body.isCustomQuote = quoted;
+    delete body.quoteOfferedAt;
+    body.quoteConfirmedByCustomer = false;
+    try {
+      if (isStandardFoodOrder) {
+        if (!restaurantDoc?.isActive || !restaurantDoc.isOpen) throw new PriceError('El restaurante no está disponible.');
+        const surcharge = body.deliveryType === 'express' ? money(settings.expressDeliverySurcharge ?? 25) : 0;
+        const price = priceFoodOrder(body, { menu: menu.menu || [], suggestedExtras: menu.suggestedExtras,
+          deliveryFee: restaurantDoc.deliveryFee + surcharge, commissionRate: restaurantDoc.commissionRate,
+          promoPercent: menu.promoActive ? menu.promoDiscountPercent || 0 : 0 });
+        ({ items, subtotal, total, deliveryFee, commissionAmount, tipAmount, promoDiscountApplied } = price);
+        body.restaurantCommissionRate = restaurantDoc.commissionRate;
+        body.deliveryTypeSurcharge = surcharge;
+      } else if (kind === 'envio') {
+        const quote = await quoteExpressDelivery({ pickupCoords: body.pickupCoordinates, deliveryCoords: body.coordinates,
+          pickupAddress: body.pickupAddress, deliveryAddress: body.deliveryAddress, deliveryType: body.deliveryType });
+        if (!quote) throw new PriceError('Fija los puntos de recolección y entrega para cotizar el envío.');
+        deliveryFee = total = commissionAmount = quote.totalFee;
+        Object.assign(body, { distanceKm: quote.distanceKm, coordinates: quote.deliveryCoords,
+          pickupCoordinates: quote.pickupCoords, deliveryTypeSurcharge: quote.expressSurcharge });
+        items = [{ id: 'envio', name: items[0]?.name || 'Envío', quantity: 1, price: 0 }];
+      } else if (kind === 'solicitud_local') {
+        const local = await prisma.partnerLocal.findUnique({ where: { id: String(body.restaurantId) } });
+        const count = body.ridersRequestedCount;
+        if (!local?.isActive || local.code !== body.localCode || !Number.isInteger(count) || count < 1 || count > 4)
+          throw new PriceError('Local o número de repartidores inválido.');
+        deliveryFee = local.serviceFee;
+        total = subtotal = commissionAmount = money(count * deliveryFee);
+        items = [{ id: 'item-riders', name: 'Servicio de reparto', quantity: count, price: deliveryFee }];
+      } else if (quoted) {
+        deliveryFee = kind === 'auxilio_gasolina' ? 0 : restaurantDoc?.deliveryFee ?? 35;
+        if (kind === 'auxilio_gasolina') {
+          const { liters, fuelType } = body.fuelDetails || {};
+          body.fuelDetails = priceFuelRequest(liters, fuelType, settings);
+          subtotal = body.fuelDetails.fuelTotal;
+        }
+        items = [{ id: 'cotizacion', name: items[0]?.name || 'Solicitud de cotización', quantity: 1, price: subtotal }];
+        total = money(subtotal + deliveryFee);
+      } else throw new PriceError('Tipo de pedido desconocido.');
+      Object.assign(body, { items, subtotal, deliveryFee, total, commissionAmount, tipAmount, promoDiscountApplied, restaurantDeliveryFee: deliveryFee });
+      body.paymentMethod ??= 'efectivo';
+      Object.assign(body, initialOrderPayment(body.paymentMethod, body.bankVerification?.trackingKey));
+    } catch (error) {
+      if (error instanceof PriceError || error instanceof TypeError) return reply.status(422).send({ error: error.message });
+      throw error;
     }
-
-    const catalogMenu: any[] = Array.isArray((restaurantDoc?.payload as any)?.menu)
-      ? (restaurantDoc?.payload as any).menu
-      : [];
-
-    const { verifiedSubtotal, calculatedTotal } = recalculateOrderTotalsServer({
-      items,
-      catalogMenu,
-      deliveryFee: Number(body.deliveryFee) || 0,
-      tipAmount: Number(body.tipAmount) || 0,
-      promoDiscountApplied: Number(body.promoDiscountApplied) || 0,
-      isCustomOrSpecialOrder: !isStandardFoodOrder,
-      fallbackSubtotal: Number(body.subtotal) || 0,
-      fallbackTotal: Number(body.total) || 0,
-    });
+    const verifiedSubtotal = subtotal;
+    const calculatedTotal = total;
 
     // 4.4 Validar límite antifraude de efectivo según historial real en PostgreSQL
     if (isStandardFoodOrder && body.paymentMethod === 'efectivo' && customerUser.role !== 'ADMIN') {
@@ -432,8 +446,11 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
 
     const orderId = String(body.id || `ord-${Date.now()}`);
     const nowIso = new Date().toISOString();
-    const deliveryFee = Math.max(0, Number(body.deliveryFee) || 0);
-    const initialStatus = String(body.status || 'nuevo');
+    const initialStatus = quoted ? 'pendiente_cotizacion' : 'nuevo';
+    if (cleanSpeiKey) body.bankVerification.trackingKey = cleanSpeiKey;
+    if (body.paymentMethod === 'transferencia' && !cleanSpeiKey && !quoted) {
+      return reply.status(422).send({ error: 'Ingresa la referencia SPEI para revisión por despacho.' });
+    }
 
     const fullPayload = {
       ...body,
@@ -449,7 +466,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       updatedAt: nowIso,
     };
 
-    const menuMap = new Map(catalogMenu.map((m) => [String(m.id), m]));
+
 
     // 4.6 Transacción relacional atómica en PostgreSQL
     const saved = await prisma.$transaction(async (tx) => {
@@ -480,14 +497,10 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
           payload: fullPayload,
           items: {
             create: items.map((it: any) => {
-              const catalogItem = menuMap.get(String(it.id));
-              const unitPrice = catalogItem
-                ? Math.max(0, Number(catalogItem.price) || 0)
-                : Math.max(0, Number(it.price) || 0);
               return {
                 productId: String(it.id || 'item'),
                 name: String(it.name || 'Producto'),
-                unitPrice,
+                unitPrice: it.price,
                 unitExtraPrice: Math.max(0, Number(it.unitExtraPrice) || 0),
                 quantity: Math.max(1, Number(it.quantity) || 1),
                 notes: it.notes ? String(it.notes) : null,
@@ -658,6 +671,22 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     const now = new Date();
     const nowIso = now.toISOString();
     const prevPayload = (existing.payload || {}) as Record<string, any>;
+    if (isAdmin && updates.paymentStatus === 'verificado') {
+      if (existing.paymentMethod !== 'transferencia') return reply.status(422).send({ error: 'La orden no es por transferencia.' });
+      updates.bankVerification = { trackingKey: existing.speiTrackingKey || prevPayload.bankVerification?.trackingKey || '',
+        verified: true, verifiedAt: nowIso, verifiedAmount: existing.total,
+        statusMessage: 'Depósito confirmado por despacho.' };
+    }
+    if (isAdmin && existing.status === 'pendiente_cotizacion' && updates.deliveryFee !== undefined) {
+      const fuel = existing.orderType === 'auxilio_gasolina';
+      const quotedSubtotal = fuel ? existing.subtotal : updates.subtotal;
+      if (![quotedSubtotal, updates.deliveryFee].every(x => Number.isFinite(x) && x >= 0))
+        return reply.status(422).send({ error: 'La cotización requiere importes válidos.' });
+      updates.subtotal = quotedSubtotal;
+      updates.total = money(quotedSubtotal + updates.deliveryFee);
+      updates.quoteOfferedAt = nowIso;
+      if (fuel) updates.fuelDetails = { ...prevPayload.fuelDetails, serviceTravelFee: updates.deliveryFee };
+    }
     const mergedPayload = {
       ...prevPayload,
       ...updates,
@@ -675,7 +704,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
           paymentStatus:
             isAdmin && updates.paymentStatus !== undefined
               ? String(updates.paymentStatus)
-              : existing.paymentStatus,
+              : undefined,
           subtotal:
             isAdmin && updates.subtotal !== undefined ? Number(updates.subtotal) : existing.subtotal,
           deliveryFee:

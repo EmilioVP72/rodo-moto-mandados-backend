@@ -204,7 +204,7 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
         orderFolio: `RD-ISO-${runId}`,
       }),
     });
-    assert.equal(speiRes.data.verified, true);
+    assert.equal(speiRes.data.verified, false);
 
     const createOrderA = await e2eFetch('/api/orders', {
       method: 'POST',
@@ -227,6 +227,7 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
       }),
     });
     assert.equal(createOrderA.status, 201);
+    assert.equal(createOrderA.data.paymentStatus, 'pendiente');
     assert.equal(createOrderA.data.subtotal, 200); // Recalculado en servidor
     assert.equal(createOrderA.data.total, 235);
     assert.equal(createOrderA.data.customerId, customerAId);

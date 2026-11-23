@@ -190,7 +190,13 @@ export async function routingRoutes(app: FastifyInstance): Promise<void> {
 
   // 3. COTIZACIÓN AUTOMÁTICA PUNTO A -> PUNTO B (ANTIFRAUDE: SIN SELECCIÓN MANUAL DE KM)
   app.post('/api/routing/express-quote', async (request, reply) => {
-    const body = (request.body || {}) as {
+    const quote = await quoteExpressDelivery((request.body || {}) as ExpressQuoteInput);
+    if (!quote) return reply.status(422).send({ error: 'Selecciona ambos puntos en el mapa.' });
+    return reply.send(quote);
+  });
+}
+
+type ExpressQuoteInput = {
       pickupCoords?: { lat?: number; lng?: number } | null;
       deliveryCoords?: { lat?: number; lng?: number } | null;
       pickupAddress?: string;
@@ -198,6 +204,7 @@ export async function routingRoutes(app: FastifyInstance): Promise<void> {
       deliveryType?: 'normal' | 'express' | 'programada';
     };
 
+export async function quoteExpressDelivery(body: ExpressQuoteInput) {
     const deliveryType =
       body.deliveryType === 'express' || body.deliveryType === 'programada'
         ? body.deliveryType
@@ -211,14 +218,7 @@ export async function routingRoutes(app: FastifyInstance): Promise<void> {
       ? { lat: Number(body.deliveryCoords.lat), lng: Number(body.deliveryCoords.lng) }
       : await geocodeAddressInSma(body.deliveryAddress || '');
 
-    if (!resolvedPickup || !resolvedDelivery) {
-      return reply.status(422).send({
-        error:
-          'No pudimos ubicar automáticamente uno de los puntos. Selecciona el Punto A y el Punto B en el mapa para calcular la tarifa real.',
-        missingPickup: !resolvedPickup,
-        missingDelivery: !resolvedDelivery,
-      });
-    }
+    if (!resolvedPickup || !resolvedDelivery) return null;
 
     let distanceKm: number;
     let estimatedMinutes: number;
@@ -252,7 +252,7 @@ export async function routingRoutes(app: FastifyInstance): Promise<void> {
     const expressSurcharge = deliveryType === 'express' ? EXPRESS_SURCHARGE_MXN : 0;
     const totalFee = baseCalculatedFee + expressSurcharge;
 
-    return reply.send({
+    return {
       distanceKm,
       estimatedMinutes,
       baseFee: EXPRESS_BASE_FEE,
@@ -263,6 +263,5 @@ export async function routingRoutes(app: FastifyInstance): Promise<void> {
       source,
       pickupCoords: resolvedPickup,
       deliveryCoords: resolvedDelivery,
-    });
-  });
+    };
 }

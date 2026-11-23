@@ -115,69 +115,6 @@ export function validateSpeiTrackingKeyFormat(rawKey: string): {
   return { valid: true, cleanKey };
 }
 
-export interface CatalogMenuItemLike {
-  id: string;
-  price: number;
-}
-
-export interface OrderItemInputLike {
-  id: string;
-  price?: number;
-  quantity?: number;
-  unitExtraPrice?: number;
-}
-
-export function recalculateOrderTotalsServer(params: {
-  items: OrderItemInputLike[];
-  catalogMenu?: CatalogMenuItemLike[];
-  deliveryFee: number;
-  tipAmount?: number;
-  promoDiscountApplied?: number;
-  isCustomOrSpecialOrder?: boolean;
-  fallbackSubtotal?: number;
-  fallbackTotal?: number;
-}): { verifiedSubtotal: number; calculatedTotal: number } {
-  const deliveryFee = Math.max(0, Number(params.deliveryFee) || 0);
-  const tipAmount = Math.max(0, Number(params.tipAmount) || 0);
-  const promoDiscount = Math.max(0, Number(params.promoDiscountApplied) || 0);
-
-  if (params.isCustomOrSpecialOrder) {
-    const sub = Math.max(0, Number(params.fallbackSubtotal) || 0);
-    const tot =
-      params.fallbackTotal !== undefined
-        ? Math.max(0, Number(params.fallbackTotal) || 0)
-        : Math.max(0, sub + deliveryFee + tipAmount - promoDiscount);
-    return { verifiedSubtotal: sub, calculatedTotal: tot };
-  }
-
-  const items = Array.isArray(params.items) ? params.items : [];
-  if (items.length === 0) {
-    const sub = Math.max(0, Number(params.fallbackSubtotal) || 0);
-    return {
-      verifiedSubtotal: sub,
-      calculatedTotal: Math.max(0, sub + deliveryFee + tipAmount - promoDiscount),
-    };
-  }
-
-  const menuMap = new Map<string, CatalogMenuItemLike>(
-    (params.catalogMenu || []).map((m) => [String(m.id), m])
-  );
-
-  let verifiedSubtotal = 0;
-  for (const item of items) {
-    const qty = Math.max(1, Number(item.quantity) || 1);
-    const catalogItem = menuMap.get(String(item.id));
-    const unitExtra = Math.max(0, Number(item.unitExtraPrice) || 0);
-    const unitPrice = catalogItem
-      ? Math.max(0, Number(catalogItem.price) || 0) + unitExtra
-      : Math.max(0, Number(item.price) || 0);
-    verifiedSubtotal += unitPrice * qty;
-  }
-
-  const calculatedTotal = Math.max(0, verifiedSubtotal + deliveryFee + tipAmount - promoDiscount);
-  return { verifiedSubtotal, calculatedTotal };
-}
-
 export function validateGpsCoordinates(
   lat: unknown,
   lng: unknown

@@ -1,10 +1,10 @@
+import { priceFoodOrder, priceFuelRequest, initialOrderPayment } from '../src/utils/orderPricing.ts';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   verifyIneDigitsServer,
   getServerCustomerCashLimit,
   validateSpeiTrackingKeyFormat,
-  recalculateOrderTotalsServer,
   validateGpsCoordinates,
   getRiderGpsPing,
   canRiderTransitionOrderStatus,
@@ -86,58 +86,6 @@ describe('Backend Domain Rules & Security Unit Tests', () => {
     });
   });
 
-  describe('4. recalculateOrderTotalsServer (Blindaje Contra Manipulación de Precios en Cliente)', () => {
-    const sampleCatalog = [
-      { id: 'ts-1', price: 100 }, // Orden de 4 Tacos de Bistec ($100)
-      { id: 'ts-4', price: 30 },  // Refresco 600ml ($30)
-    ];
-
-    it('ignora precios falsos enviados desde el navegador ($0 o $1) y recalcula con precios oficiales del catálogo', () => {
-      const tamperedClientItems = [
-        { id: 'ts-1', price: 0, quantity: 2, unitExtraPrice: 15 }, // Cliente intenta mandar $0, pero en catálogo cuesta $100 + $15 extra = $115 x 2 = $230
-        { id: 'ts-4', price: 1, quantity: 1 },                     // Cliente intenta mandar $1, pero en catálogo cuesta $30 x 1 = $30
-      ];
-
-      const result = recalculateOrderTotalsServer({
-        items: tamperedClientItems,
-        catalogMenu: sampleCatalog,
-        deliveryFee: 35,
-        tipAmount: 20,
-        promoDiscountApplied: 0,
-      });
-
-      assert.equal(result.verifiedSubtotal, 260); // $230 + $30
-      assert.equal(result.calculatedTotal, 315);  // $260 + $35 envío + $20 propina
-    });
-
-    it('aplica descuentos promocionales correctamente sin permitir totales negativos', () => {
-      const items = [{ id: 'ts-4', price: 30, quantity: 1 }];
-      const result = recalculateOrderTotalsServer({
-        items,
-        catalogMenu: sampleCatalog,
-        deliveryFee: 35,
-        tipAmount: 0,
-        promoDiscountApplied: 500, // Descuento mayor al subtotal + envío
-      });
-
-      assert.equal(result.verifiedSubtotal, 30);
-      assert.equal(result.calculatedTotal, 0);
-    });
-
-    it('respeta cotizaciones personalizadas o auxilio de gasolina cuando isCustomOrSpecialOrder es true', () => {
-      const result = recalculateOrderTotalsServer({
-        items: [],
-        deliveryFee: 50,
-        isCustomOrSpecialOrder: true,
-        fallbackSubtotal: 49,
-        fallbackTotal: 99,
-      });
-
-      assert.equal(result.verifiedSubtotal, 49);
-      assert.equal(result.calculatedTotal, 99);
-    });
-  });
-
   describe('5. validateGpsCoordinates (Validación de Coordenadas GPS en Vivo del Repartidor)', () => {
     it('rechaza valores nulos, vacíos, NaN o fuera del globo terráqueo (-90..90, -180..180)', () => {
       assert.equal(validateGpsCoordinates(null, -100.74).valid, false);
@@ -193,4 +141,31 @@ describe('Autorización del GPS', () => {
     assert.equal(getRiderGpsPing(rider, { ...point, lat: [] }, 1000), null);
     assert.equal(getRiderGpsPing(rider, { ...point, orderId: '' }, 1000), null);
   });
+});
+
+describe('Precios y pagos de pedidos', () => {
+  const catalog = { menu: [{ id: 't', name: 'Taco', price: 20, customizations: [{ id: 'q', name: 'Queso', type: 'extra', price: 5 }] }], deliveryFee: 35, commissionRate: 15, promoPercent: 0 };
+  it('usa el catálogo para el producto personalizado y cobra el modificador una sola vez', () => {
+    const items = [{ id: 't-1234567890123', quantity: 2, price: 1, unitExtraPrice: 50, selectedModifiers: [{ id: 'q', price: 0 }] }];
+    const result = priceFoodOrder({ items, promoCode: 'ENVIOGRATIS' }, catalog);
+    assert.equal(result.total, 50);
+    assert.equal(result.items[0].price, 25);
+    assert.equal(result.deliveryFee, 0);
+  });
+  it('rechaza artículos desconocidos, cantidades negativas y cupones inexistentes', () => {
+    for (const items of [[{ id: 'otro', quantity: 1 }], [{ id: 't', quantity: -1 }]]) assert.throws(() => priceFoodOrder({ items }, catalog));
+    assert.throws(() => priceFoodOrder({ items: [{ id: 't', quantity: 1 }], promoCode: 'inventado' }, catalog));
+  });
+  it('registra la referencia como pendiente hasta confirmación de despacho', () => {
+    assert.equal(initialOrderPayment('transferencia','BBVA72819').bankVerification?.verified, false);
+    assert.equal(initialOrderPayment('transferencia').paymentStatus, 'pendiente');
+    assert.equal(initialOrderPayment('efectivo').paymentStatus, 'en_efectivo');
+  });
+});
+
+it('cobra el combustible al precio configurado y deja el viaje para cotización de despacho', () => {
+  assert.deepEqual(priceFuelRequest(2, 'premium', { premiumPricePerLiter: 27 }), {
+    liters: 2, fuelType: 'premium', fuelPricePerLiter: 27, fuelTotal: 54, serviceTravelFee: 0,
+  });
+  assert.throws(() => priceFuelRequest(0, 'premium', {}));
 });
