@@ -82,9 +82,12 @@ async function bootstrap() {
     };
 
     let seededRestaurants = 0;
+    const existingSettings = await prisma.setting.findUnique({ where: { id: 'general' } });
     const currentRestCount = await prisma.restaurant.count();
 
-    if (currentRestCount === 0 && Array.isArray(body?.restaurants) && body.restaurants.length > 0) {
+    // Solo sembrar el catálogo inicial una única vez cuando la BD está completamente virgen
+    // (si ya existe Setting 'general', respetamos las eliminaciones del administrador)
+    if (!existingSettings && currentRestCount === 0 && Array.isArray(body?.restaurants) && body.restaurants.length > 0) {
       for (const r of body.restaurants) {
         if (!r?.id || !r?.name) continue;
         await prisma.restaurant.upsert({
@@ -107,7 +110,6 @@ async function bootstrap() {
       await invalidateCache('rodo:catalog:restaurants');
     }
 
-    const existingSettings = await prisma.setting.findUnique({ where: { id: 'general' } });
     if (!existingSettings && body?.settings) {
       await prisma.setting.create({
         data: {

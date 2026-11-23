@@ -11,7 +11,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
   // 1. RESTAURANTES Y COMERCIOS
   app.get('/api/restaurants', async (_request, reply) => {
     const cached = await getCache<any[]>(RESTAURANTS_CACHE_KEY);
-    if (cached && cached.length > 0) {
+    if (Array.isArray(cached)) {
       return reply.send(cached);
     }
 
