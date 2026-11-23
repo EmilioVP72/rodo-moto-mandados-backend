@@ -10,7 +10,7 @@ import {
 } from '../../utils/domainRules.js';
 
 import { quoteExpressDelivery } from '../routing/routing.routes.js';
-import { initialOrderPayment, money, priceFoodOrder, priceFuelRequest, PriceError } from '../../utils/orderPricing.js';
+import { initialOrderPayment, money, priceFoodOrder, priceFuelRequest, matchesDisplayedQuote, PriceError } from '../../utils/orderPricing.js';
 
 const CUSTOMER_ALLOWED_PATCH_FIELDS = new Set([
   'receptionConfirmed',
@@ -711,6 +711,10 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     if (!isAdmin && updates.quoteConfirmedByCustomer === true &&
         !(existing.status === 'pendiente_cotizacion' && nextStatus === 'nuevo' && quoteOffered)) {
       return reply.status(409).send({ error: 'Primero despacho debe emitir la cotización.' });
+    }
+    if (!isAdmin && existing.status === 'pendiente_cotizacion' && nextStatus === 'nuevo' &&
+        !matchesDisplayedQuote(existing.total, prevPayload.quoteOfferedAt, rawUpdates.expectedQuoteTotal, rawUpdates.expectedQuoteOfferedAt)) {
+      return reply.status(409).send({ error: 'La cotización cambió. Revisa el importe actualizado y confirma de nuevo.' });
     }
     if (!isAdmin && existing.status === 'pendiente_cotizacion' && nextStatus === 'nuevo' && updates.quoteConfirmedByCustomer !== true) {
       return reply.status(409).send({ error: 'Confirma la cotización antes de continuar.' });

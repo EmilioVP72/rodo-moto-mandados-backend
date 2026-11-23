@@ -97,3 +97,7 @@ export function priceFuelRequest(liters: number, fuelType: string, settings: { m
   const fuelPricePerLiter = money(fuelType === 'magna' ? settings.magnaPricePerLiter ?? 24.5 : settings.premiumPricePerLiter ?? 26.8);
   return { liters, fuelType, fuelPricePerLiter, fuelTotal: money(liters * fuelPricePerLiter), serviceTravelFee: 0 };
 }
+
+export function matchesDisplayedQuote(total: number, offeredAt: unknown, expectedTotal: unknown, expectedOfferedAt: unknown) {
+  return expectedTotal === total && (expectedOfferedAt ?? null) === (offeredAt ?? null);
+}

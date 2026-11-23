@@ -1,5 +1,5 @@
 import { parseImage, mayAccessOrderEvidence, isOrderFolder } from '../src/utils/evidence.ts';
-import { priceFoodOrder, priceFuelRequest, initialOrderPayment } from '../src/utils/orderPricing.ts';
+import { priceFoodOrder, priceFuelRequest, matchesDisplayedQuote, initialOrderPayment } from '../src/utils/orderPricing.ts';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -207,4 +207,11 @@ describe('Evidencia de pedidos', () => {
     assert.equal(parseImage('data:image/png;base64,SG9sYQ=='), null);
     assert.equal(parseImage('data:image/png;base64,' + 'A'.repeat(5600000)), null);
   });
+});
+
+it('acepta solo el importe y la versión de la cotización que vio el cliente', () => {
+  assert.ok(matchesDisplayedQuote(89, 'v2', 89, 'v2'));
+  assert.ok(!matchesDisplayedQuote(89, 'v2', 49, 'v1'));
+  assert.ok(!matchesDisplayedQuote(89, 'v2', 89, 'v1'));
+  assert.ok(matchesDisplayedQuote(89, undefined, 89, undefined));
 });
