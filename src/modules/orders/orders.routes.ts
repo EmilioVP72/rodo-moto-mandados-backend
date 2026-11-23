@@ -318,6 +318,8 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'Datos de la orden incompletos.' });
     }
 
+    delete body.deliverySignatureDataUrl;
+    delete body.deliveryProofPhotoUrl;
     delete body.riderLiveCoordinates;
     delete body.riderLastLocationUpdate;
 
@@ -668,6 +670,14 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     const nowIso = now.toISOString();
     const prevPayload = (existing.payload || {}) as Record<string, any>;
     delete updates.quoteOfferedAt;
+    for (const [field, folder] of [['deliverySignatureDataUrl', 'signatures'], ['deliveryProofPhotoUrl', 'proofs']]) {
+      const url = updates[field];
+      if (url === undefined || url === prevPayload[field]) continue;
+      if (typeof url !== 'string' || !url.startsWith(`/uploads/${folder}/`) ||
+          !await prisma.orderUpload.findFirst({ where: { orderId: id, url } })) {
+        return reply.code(422).send({ error: 'La evidencia debe cargarse y pertenecer a este pedido.' });
+      }
+    }
     if (isAdmin && updates.paymentStatus === 'verificado') {
       if (existing.paymentMethod !== 'transferencia') return reply.status(422).send({ error: 'La orden no es por transferencia.' });
       updates.bankVerification = { trackingKey: existing.speiTrackingKey || prevPayload.bankVerification?.trackingKey || '',

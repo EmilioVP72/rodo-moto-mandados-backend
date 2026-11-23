@@ -196,6 +196,7 @@ model PartnerLocal {
 
 // 9. ÓRDENES TRANSACCIONALES (CON LLAVE FORÁNEA ESTRICTA AL CLIENTE PROPIETARIO)
 model Order {
+  uploads OrderUpload[]
   id                 String   @id
   folio              String   @unique
   orderType          String   @default("comida")
@@ -341,4 +342,12 @@ model AccountRecoveryRequest {
   @@index([newEmail, status])
   @@index([storedAt(sort: Desc)])
   @@map("account_recovery_requests")
+}
+
+model OrderUpload {
+  url String @id
+  orderId String
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  @@index([orderId])
+  @@map("order_uploads")
 }

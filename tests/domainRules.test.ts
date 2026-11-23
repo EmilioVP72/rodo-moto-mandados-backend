@@ -1,3 +1,4 @@
+import { parseImage, mayAccessOrderEvidence, isOrderFolder } from '../src/utils/evidence.ts';
 import { priceFoodOrder, priceFuelRequest, initialOrderPayment } from '../src/utils/orderPricing.ts';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -185,5 +186,25 @@ describe('Transiciones autorizadas por rol', () => {
   it('mantiene cerrados los estados finales y exige pago para repartir una transferencia', () => {
     for (const role of ['ADMIN','CUSTOMER','RIDER']) assert.deepEqual(allowedOrderTransitions(role, {...order, status:'entregado'}), []);
     assert.deepEqual(allowedOrderTransitions('RIDER', {...order, status:'asignado', paymentMethod:'transferencia', paymentStatus:'pendiente'}), []);
+  });
+});
+
+describe('Evidencia de pedidos', () => {
+  const order = { customerId: 'cliente', assignedRiderUserId: 'r1' };
+  it('limita acceso a la orden propia, a despacho y al repartidor asignado', () => {
+    assert.ok(mayAccessOrderEvidence({ role:'CUSTOMER', sub:'cliente' }, order, 'proofs'));
+    assert.ok(mayAccessOrderEvidence({ role:'ADMIN', sub:'admin' }, order, 'transfers'));
+    assert.ok(mayAccessOrderEvidence({ role:'RIDER', sub:'r1' }, order, 'signatures'));
+    assert.ok(!mayAccessOrderEvidence({ role:'CUSTOMER', sub:'otro' }, order, 'proofs'));
+    assert.ok(!mayAccessOrderEvidence({ role:'RIDER', sub:'r2' }, order, 'proofs'));
+    assert.ok(!mayAccessOrderEvidence({ role:'RIDER', sub:'r1' }, order, 'transfers'));
+    assert.ok(!isOrderFolder('recovery'));
+  });
+  it('valida el contenido, el tipo declarado y el tamaño del archivo', () => {
+    const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jvE0AAAAASUVORK5CYII=';
+    assert.ok(parseImage(png));
+    assert.equal(parseImage(png.replace('png','jpeg')), null);
+    assert.equal(parseImage('data:image/png;base64,SG9sYQ=='), null);
+    assert.equal(parseImage('data:image/png;base64,' + 'A'.repeat(5600000)), null);
   });
 });

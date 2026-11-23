@@ -1,3 +1,4 @@
+import { saveImage } from '../uploads/storage.js';
 import { FastifyInstance } from 'fastify';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
@@ -935,7 +936,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(list.map(serializeRecoveryRequest));
   });
 
-  app.post('/api/auth/recovery', async (request, reply) => {
+  app.post('/api/auth/recovery', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (request, reply) => {
     const body = request.body as any;
     if (!body?.id || !body?.folio || !body?.newEmail) {
       return reply.status(400).send({ error: 'Datos de solicitud incompletos.' });
@@ -950,12 +951,13 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const cleanRecoveryIne = !rawRecoveryIne.includes('*') ? normalizeIneDigits(rawRecoveryIne) : '';
     const encryptedRecoveryIne = cleanRecoveryIne ? encryptIneDigits(cleanRecoveryIne) : null;
 
-    const created = await prisma.accountRecoveryRequest.upsert({
-      where: { id: body.id },
-      update: {
-        status: body.status || 'pendiente',
-      },
-      create: {
+    if (!z.string().email().safeParse(body.newEmail).success || !body.customerName || !body.phone) {
+      return reply.code(400).send({ error: 'Completa tu nombre, teléfono y correo.' });
+    }
+    const image = await saveImage('recovery', body.documentPhotoUrl);
+    if (!image) return reply.code(400).send({ error: 'Adjunta una identificación JPG, PNG o WebP de hasta 4 MB.' });
+    const created = await prisma.accountRecoveryRequest.create({
+      data: {
         id: body.id,
         folio: body.folio,
         userId: matchedUser?.id || null,
@@ -964,16 +966,16 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         oldEmail: oldEmailClean,
         newEmail: String(body.newEmail || '').trim().toLowerCase(),
         reason: body.reason || null,
-        documentPhotoUrl: body.documentPhotoUrl || null,
+        documentPhotoUrl: image.url,
         ine10Digits: encryptedRecoveryIne,
         status: 'pendiente',
         createdAt: body.createdAt || new Date().toISOString(),
       },
-    });
+    }).catch(async error => { await image.discard(); throw error; });
 
     const serializedRecovery = serializeRecoveryRequest(created);
     emitAdminEvent('recovery:updated', serializedRecovery);
-    return reply.status(201).send(serializedRecovery);
+    return reply.status(201).send({ id: created.id, folio: created.folio, status: created.status });
   });
 
   app.patch('/api/auth/recovery/:id', { preHandler: [requireAdmin] }, async (request, reply) => {

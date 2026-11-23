@@ -48,12 +48,12 @@ async function bootstrap() {
   });
 
   // 2. Directorio persistente de archivos subidos (/uploads)
-  const uploadsRoot = path.resolve(env.UPLOADS_DIR);
+  const uploadsRoot = path.resolve(env.UPLOADS_DIR, 'restaurants');
   await fs.mkdir(uploadsRoot, { recursive: true });
 
   await app.register(fastifyStatic, {
     root: uploadsRoot,
-    prefix: '/uploads/',
+    prefix: '/uploads/restaurants/',
   });
 
   // 3. Healthcheck y Diagnóstico de Infraestructura
