@@ -29,3 +29,12 @@ npm run test:e2e
 
 ## Despliegue en Producción (VPS Hostinger)
 La carpeta `deploy/` contiene `docker-compose.prod.yml`, `Caddyfile` (HTTPS Let's Encrypt automático) y `deploy-hostinger.sh`.
+
+
+### Migraciones de PostgreSQL
+
+Antes de actualizar el VPS, toma un respaldo de la base existente. El contenedor ejecuta `npm run db:deploy` (el mismo script se puede ejecutar manualmente) antes de arrancar la API. Una base vacía recibe las migraciones de `prisma/migrations` en orden.
+
+Para una instalación que usaba `db push`, el primer arranque compara el esquema real con las cuatro versiones conocidas desde el índice de INE de `5cd45c4`. Solo registra como aplicadas las migraciones que ya están presentes y ejecuta las pendientes. Si el esquema difiere, el arranque se detiene antes de la adopción. Para diagnosticarlo desde la imagen del backend, ejecuta `npx prisma migrate diff --from-schema-datasource prisma/schema.prisma --to-schema-datamodel prisma/adoption/schema.prisma --script` y revisa su salida antes de preparar una migración específica.
+
+Los despliegues posteriores usan el historial de Prisma. Para un nuevo cambio de esquema, agrega una migración SQL versionada. Conserva los archivos de adopción como referencia de las versiones antiguas.

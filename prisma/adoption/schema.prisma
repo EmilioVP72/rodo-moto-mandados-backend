@@ -1,0 +1,353 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  PARTNER_LOCAL
+  RIDER
+  CUSTOMER
+}
+
+enum AccountStatus {
+  activo
+  bloqueado_fraude
+}
+
+// 1. USUARIOS Y PERFILES (IDENTIDAD MAESTRA + ANTIFRAUDE INE + RBAC)
+model User {
+  id                   String        @id @default(cuid())
+  name                 String
+  phone                String
+  email                String        @unique
+  passwordHash         String
+  role                 UserRole      @default(CUSTOMER)
+  ineVerified          Boolean       @default(false)
+  ine10Digits          String?
+  ine10DigitsHash      String?       @unique
+  inePhotoUploaded     Boolean       @default(false)
+  ineVerifiedAt        DateTime?
+  pendingDebt          Float         @default(0)
+  debtReason           String?
+  debtOrderFolio       String?
+  debtDate             String?
+  status               AccountStatus @default(activo)
+  fraudReason          String?
+  blockedAt            DateTime?
+  completedOrdersCount Int           @default(0)
+  referralCode         String?       @unique
+  referredByCode       String?
+  referralRewardsCount Int           @default(0)
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  // Relaciones 1:N con integridad referencial estricta
+  sessions         RefreshSession[]
+  passwordResets   PasswordResetToken[]
+  addresses        CustomerAddress[]
+  favorites        UserFavorite[]
+  coupons          Coupon[]
+  orders           Order[]
+  recoveryRequests AccountRecoveryRequest[]
+  auditLogs        AuditLog[]
+  assignedOrders   Order[]       @relation("AssignedRiderOrders")
+
+  @@index([phone])
+  @@index([role])
+  @@index([status])
+  @@map("users")
+}
+
+// 2. SESIONES ACTIVAS (REFRESH TOKENS HASHEADOS CON REVOCACIÓN POR DISPOSITIVO)
+model RefreshSession {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  userAgent String?
+  ipAddress String?
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_sessions")
+}
+
+// 3. TOKENS DE RECUPERACIÓN DE CONTRASEÑA (AUTO-SERVICIO SEGURO CON EXPIRACIÓN Y LÍMITE DE INTENTOS)
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  codeHash  String
+  expiresAt DateTime
+  usedAt    DateTime?
+  attempts  Int       @default(0)
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+// 4. DIRECCIONES GUARDADAS POR CLIENTE (AISLADAS POR USER_ID)
+model CustomerAddress {
+  id             String   @id @default(cuid())
+  userId         String
+  label          String   @default("Casa")
+  calle          String
+  numero         String?
+  numeroInterior String?
+  colonia        String
+  referencias    String?
+  lat            Float?
+  lng            Float?
+  isDefault      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("customer_addresses")
+}
+
+// 5. RESTAURANTES Y COMERCIOS DE SAN MIGUEL DE ALLENDE
+model Restaurant {
+  id                String   @id
+  name              String
+  establishmentType String   @default("restaurante")
+  category          String
+  deliveryFee       Float    @default(35)
+  commissionRate    Float    @default(15)
+  isActive          Boolean  @default(true)
+  isOpen            Boolean  @default(true)
+  payload           Json
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  orders    Order[]
+  favorites UserFavorite[]
+
+  @@index([category])
+  @@index([isActive, isOpen])
+  @@map("restaurants")
+}
+
+// 6. RESTAURANTES FAVORITOS POR USUARIO (RELACIÓN N:M NORMALIZADA)
+model UserFavorite {
+  id           String   @id @default(cuid())
+  userId       String
+  restaurantId String
+  createdAt    DateTime @default(now())
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, restaurantId])
+  @@index([userId])
+  @@map("user_favorites")
+}
+
+// 7. CUPONES PERSONALES Y RECOMPENSAS DE REFERIDOS POR USUARIO
+model Coupon {
+  id             String    @id @default(cuid())
+  userId         String
+  code           String
+  discount       Float
+  label          String
+  reason         String
+  used           Boolean   @default(false)
+  usedAt         DateTime?
+  usedOrderFolio String?
+  earnedAt       DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, code])
+  @@index([userId, used])
+  @@map("coupons")
+}
+
+// 8. LOCALES ASOCIADOS CON CÓDIGO PIN ÚNICO DE 3 DÍGITOS
+model PartnerLocal {
+  id            String   @id
+  code          String   @unique
+  name          String
+  phone         String
+  serviceFee    Float    @default(35)
+  address       Json
+  contactPerson String?
+  notes         String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("partner_locals")
+}
+
+// 9. ÓRDENES TRANSACCIONALES (CON LLAVE FORÁNEA ESTRICTA AL CLIENTE PROPIETARIO)
+model Order {
+  uploads OrderUpload[]
+  id                 String   @id
+  folio              String   @unique
+  orderType          String   @default("comida")
+  customerId         String
+  customerName       String
+  customerPhone      String
+  customerEmail      String?
+  restaurantId       String
+  restaurantRefId    String?
+  restaurantName     String
+  subtotal           Float    @default(0)
+  deliveryFee        Float    @default(0)
+  commissionAmount   Float    @default(0)
+  total              Float    @default(0)
+  paymentMethod      String   @default("efectivo")
+  paymentStatus      String   @default("en_efectivo")
+  speiTrackingKey    String?  @unique
+  deliveryAddress    String
+  status             String   @default("nuevo")
+  assignedRiderName  String?
+  assignedRiderPhone String?
+  assignedRiderUserId String?
+  payload            Json
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  // Integridad referencial y aislamiento estricto por dueño
+  customer      User                 @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  assignedRider User?                @relation("AssignedRiderOrders", fields: [assignedRiderUserId], references: [id], onDelete: SetNull)
+  restaurant    Restaurant?          @relation(fields: [restaurantRefId], references: [id], onDelete: SetNull)
+  items         OrderItem[]
+  statusHistory OrderStatusHistory[]
+
+  @@index([customerId, createdAt(sort: Desc)])
+  @@index([status])
+  @@index([createdAt(sort: Desc)])
+  @@index([assignedRiderUserId, status])
+  @@map("orders")
+}
+
+// 10. DETALLE NORMALIZADO DE PLATILLOS / ARTÍCULOS POR ORDEN
+model OrderItem {
+  id             String  @id @default(cuid())
+  orderId        String
+  productId      String
+  name           String
+  unitPrice      Float
+  unitExtraPrice Float   @default(0)
+  quantity       Int     @default(1)
+  notes          String?
+  customizations Json?
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("order_items")
+}
+
+// 11. HISTORIAL INMUTABLE DE TRANSICIONES DE ESTADO POR ORDEN
+model OrderStatusHistory {
+  id              String   @id @default(cuid())
+  orderId         String
+  fromStatus      String?
+  toStatus        String
+  changedByUserId String?
+  changedByRole   UserRole?
+  note            String?
+  createdAt       DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt(sort: Desc)])
+  @@map("order_status_history")
+}
+
+// 12. CONFIGURACIÓN OPERATIVA GLOBAL
+model Setting {
+  id        String   @id @default("general")
+  payload   Json
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+// 13. BITÁCORA INMUTABLE DE AUDITORÍA ADMINISTRATIVA
+model AuditLog {
+  id                 String   @id
+  timestamp          String
+  adminEmail         String
+  adminUserId        String?
+  actionType         String
+  details            String
+  affectedFolio      String?
+  affectedRestaurant String?
+  previousValue      Json?
+  newValue           Json?
+  metadata           Json?
+  createdAt          DateTime @default(now())
+
+  adminUser User? @relation(fields: [adminUserId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
+
+// 14. NOTIFICACIONES MASIVAS DE MARKETING Y OPERACIÓN
+model BroadcastNotification {
+  id              String   @id
+  title           String
+  message         String
+  promoCode       String?
+  scheduledFor    String?
+  sendImmediately Boolean  @default(true)
+  sentBy          String
+  createdAt       String
+  storedAt        DateTime @default(now())
+
+  @@index([storedAt(sort: Desc)])
+  @@map("broadcast_notifications")
+}
+
+// 15. SOLICITUDES DE SOPORTE DE RECUPERACIÓN / CAMBIO DE CORREO CON EVIDENCIA INE
+model AccountRecoveryRequest {
+  id               String   @id
+  folio            String   @unique
+  userId           String?
+  customerName     String
+  phone            String
+  oldEmail         String
+  newEmail         String
+  reason           String?
+  documentPhotoUrl String?
+  ine10Digits      String?
+  status           String   @default("pendiente")
+  adminNotes       String?
+  reviewedBy       String?
+  reviewedAt       String?
+  createdAt        String
+  storedAt         DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([newEmail, status])
+  @@index([storedAt(sort: Desc)])
+  @@map("account_recovery_requests")
+}
+
+model OrderUpload {
+  url String @id
+  orderId String
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  @@index([orderId])
+  @@map("order_uploads")
+}

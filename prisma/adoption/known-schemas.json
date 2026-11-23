@@ -1,0 +1,18 @@
+[
+  {
+    "migration": "202611230001_baseline",
+    "remainingSql": "-- AlterTable\nALTER TABLE \"orders\" ADD COLUMN     \"assignedRiderUserId\" TEXT;\n\n-- AlterTable\nALTER TABLE \"order_status_history\" ADD COLUMN     \"changedByRole\" \"UserRole\";\n\n-- CreateTable\nCREATE TABLE \"order_uploads\" (\n    \"url\" TEXT NOT NULL,\n    \"orderId\" TEXT NOT NULL,\n\n    CONSTRAINT \"order_uploads_pkey\" PRIMARY KEY (\"url\")\n);\n\n-- CreateIndex\nCREATE INDEX \"order_uploads_orderId_idx\" ON \"order_uploads\"(\"orderId\");\n\n-- CreateIndex\nCREATE INDEX \"orders_assignedRiderUserId_status_idx\" ON \"orders\"(\"assignedRiderUserId\", \"status\");\n\n-- AddForeignKey\nALTER TABLE \"orders\" ADD CONSTRAINT \"orders_assignedRiderUserId_fkey\" FOREIGN KEY (\"assignedRiderUserId\") REFERENCES \"users\"(\"id\") ON DELETE SET NULL ON UPDATE CASCADE;\n\n-- AddForeignKey\nALTER TABLE \"order_uploads\" ADD CONSTRAINT \"order_uploads_orderId_fkey\" FOREIGN KEY (\"orderId\") REFERENCES \"orders\"(\"id\") ON DELETE CASCADE ON UPDATE CASCADE;"
+  },
+  {
+    "migration": "202611230002_rider_assignment",
+    "remainingSql": "-- AlterTable\nALTER TABLE \"order_status_history\" ADD COLUMN     \"changedByRole\" \"UserRole\";\n\n-- CreateTable\nCREATE TABLE \"order_uploads\" (\n    \"url\" TEXT NOT NULL,\n    \"orderId\" TEXT NOT NULL,\n\n    CONSTRAINT \"order_uploads_pkey\" PRIMARY KEY (\"url\")\n);\n\n-- CreateIndex\nCREATE INDEX \"order_uploads_orderId_idx\" ON \"order_uploads\"(\"orderId\");\n\n-- AddForeignKey\nALTER TABLE \"order_uploads\" ADD CONSTRAINT \"order_uploads_orderId_fkey\" FOREIGN KEY (\"orderId\") REFERENCES \"orders\"(\"id\") ON DELETE CASCADE ON UPDATE CASCADE;"
+  },
+  {
+    "migration": "202611230003_status_actor",
+    "remainingSql": "-- CreateTable\nCREATE TABLE \"order_uploads\" (\n    \"url\" TEXT NOT NULL,\n    \"orderId\" TEXT NOT NULL,\n\n    CONSTRAINT \"order_uploads_pkey\" PRIMARY KEY (\"url\")\n);\n\n-- CreateIndex\nCREATE INDEX \"order_uploads_orderId_idx\" ON \"order_uploads\"(\"orderId\");\n\n-- AddForeignKey\nALTER TABLE \"order_uploads\" ADD CONSTRAINT \"order_uploads_orderId_fkey\" FOREIGN KEY (\"orderId\") REFERENCES \"orders\"(\"id\") ON DELETE CASCADE ON UPDATE CASCADE;"
+  },
+  {
+    "migration": "202611230004_order_evidence",
+    "remainingSql": "-- This is an empty migration."
+  }
+]
