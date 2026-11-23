@@ -15,8 +15,21 @@ import {
 } from '../../middlewares/auth.js';
 import { emitAdminEvent } from '../../infra/socket.js';
 import { verifyIneDigitsServer } from '../../utils/domainRules.js';
+import {
+  prepareIneForStorage,
+  maskIneDigits,
+  encryptIneDigits,
+  normalizeIneDigits,
+} from '../../utils/ineCrypto.js';
 
 const BCRYPT_ROUNDS = 12;
+
+function serializeRecoveryRequest(rec: any) {
+  return {
+    ...rec,
+    ine10Digits: maskIneDigits(rec.ine10Digits) || null,
+  };
+}
 
 function serializeUserAccount(user: any) {
   const couponsList = Array.isArray(user.coupons)
@@ -31,6 +44,8 @@ function serializeUserAccount(user: any) {
       }))
     : [];
 
+  const maskedIne = maskIneDigits(user.ine10Digits);
+
   return {
     id: user.id,
     name: user.name,
@@ -38,8 +53,8 @@ function serializeUserAccount(user: any) {
     email: user.email,
     role: user.role,
     ineVerified: user.ineVerified,
-    ineDigits: user.ine10Digits || undefined,
-    ine10Digits: user.ine10Digits || undefined,
+    ineDigits: maskedIne,
+    ine10Digits: maskedIne,
     inePhotoUploaded: user.inePhotoUploaded,
     ineVerifiedAt:
       user.ineVerifiedAt instanceof Date
@@ -95,9 +110,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: ineCheck.reason });
     }
 
-    // Verificar INE duplicado o con adeudo en PostgreSQL
+    // Cifrar INE con AES-256-GCM y generar índice ciego HMAC-SHA256 para búsqueda única/antifraude
+    const preparedIne = prepareIneForStorage(cleanDigits);
+    if (!preparedIne) {
+      return reply.status(400).send({ error: 'No se pudieron procesar los 10 dígitos de tu INE.' });
+    }
+
+    // Verificar INE duplicado o con adeudo en PostgreSQL usando índice ciego HMAC (sin texto plano)
     const existingByIne = await prisma.user.findUnique({
-      where: { ine10Digits: cleanDigits },
+      where: { ine10DigitsHash: preparedIne.hash },
       include: { coupons: true },
     });
 
@@ -148,7 +169,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         const referrer = await tx.user.findUnique({
           where: { referralCode: refCode },
         });
-        if (referrer && referrer.email !== cleanEmail && referrer.ine10Digits !== cleanDigits) {
+        if (referrer && referrer.email !== cleanEmail && referrer.ine10DigitsHash !== preparedIne.hash) {
           referredByCode = refCode;
           referrerId = referrer.id;
         }
@@ -163,7 +184,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           passwordHash,
           role: 'CUSTOMER',
           ineVerified: true,
-          ine10Digits: cleanDigits,
+          ine10Digits: preparedIne.encrypted,
+          ine10DigitsHash: preparedIne.hash,
           inePhotoUploaded: true,
           ineVerifiedAt: new Date(),
           pendingDebt: 0,
@@ -278,6 +300,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       if (approvedRecovery) {
         const passwordHash = await bcrypt.hash(cleanPass, BCRYPT_ROUNDS);
         const recPhone = approvedRecovery.phone.replace(/[^0-9]/g, '');
+        const preparedRecIne = prepareIneForStorage(approvedRecovery.ine10Digits);
         user = await prisma.user.create({
           data: {
             id: `cust-${recPhone || Date.now()}`,
@@ -287,7 +310,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
             passwordHash,
             role: 'CUSTOMER',
             ineVerified: true,
-            ine10Digits: approvedRecovery.ine10Digits || null,
+            ine10Digits: preparedRecIne?.encrypted || null,
+            ine10DigitsHash: preparedRecIne?.hash || null,
             inePhotoUploaded: true,
             ineVerifiedAt: new Date(),
             status: 'activo',
@@ -305,8 +329,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     // Verificar bloqueo por deuda o fraude (solo para clientes)
     if (user.role !== 'ADMIN' && (user.status === 'bloqueado_fraude' || user.pendingDebt > 0)) {
+      const maskedBlockedIne = maskIneDigits(user.ine10Digits);
       return reply.status(403).send({
-        error: `Acceso bloqueado: Esta cuenta (INE ****${(user.ine10Digits || '').slice(-4)}) registra un adeudo pendiente de $${user.pendingDebt.toFixed(2)} MXN. Liquida el saldo para reactivar tu servicio.`,
+        error: `Acceso bloqueado: Esta cuenta (INE ****${(maskedBlockedIne || '').slice(-4)}) registra un adeudo pendiente de $${user.pendingDebt.toFixed(2)} MXN. Liquida el saldo para reactivar tu servicio.`,
         blockedAccount: serializeUserAccount(user),
       });
     }
@@ -833,6 +858,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const cleanEmail = String(body.email).trim().toLowerCase();
     const id = body.id || `cust-${Date.now()}`;
     const defaultHash = await bcrypt.hash(cryptoRandomFallback(), 10);
+    const rawIneInput = typeof (body.ine10Digits || body.ineDigits) === 'string'
+      ? String(body.ine10Digits || body.ineDigits)
+      : '';
+    const preparedAdminIne =
+      rawIneInput && !rawIneInput.includes('*') ? prepareIneForStorage(rawIneInput) : null;
 
     const saved = await prisma.user.upsert({
       where: { email: cleanEmail },
@@ -840,7 +870,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         name: body.name || 'Cliente RODO',
         phone: body.phone || '',
         ineVerified: Boolean(body.ineVerified ?? true),
-        ine10Digits: body.ine10Digits || body.ineDigits || null,
+        ...(preparedAdminIne
+          ? {
+              ine10Digits: preparedAdminIne.encrypted,
+              ine10DigitsHash: preparedAdminIne.hash,
+            }
+          : {}),
         inePhotoUploaded: Boolean(body.inePhotoUploaded ?? true),
         pendingDebt: Number(body.pendingDebt ?? 0),
         debtReason: body.debtReason || null,
@@ -862,7 +897,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         passwordHash: defaultHash,
         role: 'CUSTOMER',
         ineVerified: Boolean(body.ineVerified ?? true),
-        ine10Digits: body.ine10Digits || body.ineDigits || null,
+        ine10Digits: preparedAdminIne?.encrypted || null,
+        ine10DigitsHash: preparedAdminIne?.hash || null,
         inePhotoUploaded: Boolean(body.inePhotoUploaded ?? true),
         pendingDebt: Number(body.pendingDebt ?? 0),
         debtReason: body.debtReason || null,
@@ -896,7 +932,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       orderBy: { storedAt: 'desc' },
       take: 100,
     });
-    return reply.send(list);
+    return reply.send(list.map(serializeRecoveryRequest));
   });
 
   app.post('/api/auth/recovery', async (request, reply) => {
@@ -909,6 +945,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const matchedUser = oldEmailClean
       ? await prisma.user.findUnique({ where: { email: oldEmailClean }, select: { id: true } })
       : null;
+
+    const rawRecoveryIne = typeof body.ine10Digits === 'string' ? body.ine10Digits : '';
+    const cleanRecoveryIne = !rawRecoveryIne.includes('*') ? normalizeIneDigits(rawRecoveryIne) : '';
+    const encryptedRecoveryIne = cleanRecoveryIne ? encryptIneDigits(cleanRecoveryIne) : null;
 
     const created = await prisma.accountRecoveryRequest.upsert({
       where: { id: body.id },
@@ -925,14 +965,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         newEmail: String(body.newEmail || '').trim().toLowerCase(),
         reason: body.reason || null,
         documentPhotoUrl: body.documentPhotoUrl || null,
-        ine10Digits: body.ine10Digits || null,
+        ine10Digits: encryptedRecoveryIne,
         status: 'pendiente',
         createdAt: body.createdAt || new Date().toISOString(),
       },
     });
 
-    emitAdminEvent('recovery:updated', created);
-    return reply.status(201).send(created);
+    const serializedRecovery = serializeRecoveryRequest(created);
+    emitAdminEvent('recovery:updated', serializedRecovery);
+    return reply.status(201).send(serializedRecovery);
   });
 
   app.patch('/api/auth/recovery/:id', { preHandler: [requireAdmin] }, async (request, reply) => {
@@ -985,8 +1026,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
-    emitAdminEvent('recovery:updated', updated);
-    return reply.send(updated);
+    const serializedUpdatedRecovery = serializeRecoveryRequest(updated);
+    emitAdminEvent('recovery:updated', serializedUpdatedRecovery);
+    return reply.send(serializedUpdatedRecovery);
   });
 
   // LISTA NEGRA CENTRALIZADA (EXCLUSIVO ADMIN)

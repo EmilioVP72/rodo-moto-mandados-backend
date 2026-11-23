@@ -8,7 +8,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "node --experimental-strip-types --test tests/domainRules.test.ts",
+    "test": "node --experimental-strip-types --test tests/domainRules.test.ts tests/ineCrypto.test.ts",
     "test:e2e": "node --experimental-strip-types --test tests/e2eIntegration.test.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push --accept-data-loss"

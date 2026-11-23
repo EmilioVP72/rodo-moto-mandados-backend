@@ -28,7 +28,8 @@ model User {
   passwordHash         String
   role                 UserRole      @default(CUSTOMER)
   ineVerified          Boolean       @default(false)
-  ine10Digits          String?       @unique
+  ine10Digits          String?
+  ine10DigitsHash      String?       @unique
   inePhotoUploaded     Boolean       @default(false)
   ineVerifiedAt        DateTime?
   pendingDebt          Float         @default(0)

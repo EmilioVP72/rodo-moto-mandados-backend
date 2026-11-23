@@ -15,6 +15,10 @@ const envSchema = z.object({
     .string()
     .min(16)
     .default('rodo_super_secret_jwt_key_sma_2026_enterprise'),
+  INE_ENCRYPTION_KEY: z.preprocess(
+    (val) => (typeof val === 'string' && val.trim() === '' ? undefined : val),
+    z.string().min(16).optional()
+  ),
   JWT_EXPIRES_IN: z.string().default('30d'),
   ADMIN_EMAIL: z.string().default('edsoncruz14999@gmail.com'),
   ADMIN_INITIAL_PASSWORD: z.string().default('RODO2026'),

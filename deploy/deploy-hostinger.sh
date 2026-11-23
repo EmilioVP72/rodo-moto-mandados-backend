@@ -109,6 +109,7 @@ if [ ! -f ".env" ]; then
 
   PG_PASS="$(openssl rand -hex 24)"
   JWT_KEY="$(openssl rand -hex 32)"
+  INE_KEY="$(openssl rand -hex 32)"
 
   cat > .env <<EOF
 WEB_PORT=${USER_WEB_PORT}
@@ -123,6 +124,7 @@ POSTGRES_DB=${USER_DB}
 
 NODE_ENV=production
 JWT_SECRET=${JWT_KEY}
+INE_ENCRYPTION_KEY=${INE_KEY}
 ADMIN_EMAIL=${USER_ADMIN_EMAIL}
 ADMIN_INITIAL_PASSWORD=${USER_ADMIN_PASS}
 CORS_ORIGIN=${CORS_VALUE}
@@ -145,6 +147,9 @@ else
   fi
   if ! grep -q '^POSTGRES_HOST=' .env; then
     echo "POSTGRES_HOST=${PG_CONTAINER}" >> .env
+  fi
+  if ! grep -q '^INE_ENCRYPTION_KEY=' .env; then
+    echo "INE_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env
   fi
 fi
 
