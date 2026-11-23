@@ -19,6 +19,17 @@ async function e2eFetch(path: string, options: RequestInit = {}) {
   return { status: res.status, ok: res.ok, data, headers: res.headers };
 }
 
+async function readMailboxCode(email: string): Promise<string> {
+  const inbox = new URL('/api/v1/messages', process.env.E2E_MAILPIT_URL);
+  const messages = await (await fetch(inbox)).json();
+  const message = messages.messages.find((m: any) => m.To.some((address: any) => address.Address === email));
+  assert.ok(message, 'Debe llegar correo a la cuenta de prueba');
+  const mail = await (await fetch(new URL('/api/v1/message/' + message.ID, inbox))).json();
+  const resetCode = mail.Text.match(/\b\d{6}\b/)?.[0];
+  assert.ok(resetCode);
+  return resetCode;
+}
+
 function makeValidIne10(seed6: string, prefix3: string): string {
   const base9 = `${prefix3}${seed6.slice(-6).padStart(6, '0')}`;
   const weights = [7, 3, 1, 7, 3, 1, 7, 3, 1];
@@ -285,13 +296,7 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
     assert.equal(forgotRes.status, 200);
     assert.equal(forgotRes.data.ok, true);
     assert.equal(forgotRes.data.resetCodePreview, undefined);
-    const inbox = new URL('/api/v1/messages', process.env.E2E_MAILPIT_URL);
-    const messages = await (await fetch(inbox)).json();
-    const message = messages.messages.find((m: any) => m.To.some((address: any) => address.Address === emailA));
-    assert.ok(message, 'Debe llegar correo a la cuenta de prueba');
-    const mail = await (await fetch(new URL('/api/v1/message/' + message.ID, inbox))).json();
-    const resetCode = mail.Text.match(/\b\d{6}\b/)?.[0];
-    assert.ok(resetCode);
+    const resetCode = await readMailboxCode(emailA);
 
     // Código incorrecto debe ser rechazado (400)
     const wrongCodeRes = await e2eFetch('/api/auth/reset-password', {
@@ -492,5 +497,25 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
       await new Promise(resolve=>setTimeout(resolve,300));
     }
     assert.equal(await contains('/api/broadcasts',customerBToken),1);
+  });
+  it('13. Las recuperaciones antiguas aprobadas habilitan el acceso mediante correo', {
+    skip: !process.env.E2E_MAILPIT_URL && 'Requiere buzón de prueba Mailpit',
+  }, async () => {
+    const email = 'legacy.' + runId + '@example.invalid';
+    const id = 'legacy-' + runId;
+    const recovery = await e2eFetch('/api/auth/recovery', { method:'POST', body:JSON.stringify({
+      id, folio:id, newEmail:email, customerName:'Cuenta histórica', phone:'4159'+runId,
+      documentPhotoUrl:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+kZQAAAABJRU5ErkJggg==',
+    }) });
+    assert.equal(recovery.status,201);
+    assert.equal((await e2eFetch('/api/auth/recovery/'+id,options(adminToken,'PATCH',{status:'aprobada'}))).status,200);
+    const request = await e2eFetch('/api/auth/forgot-password',{method:'POST',body:JSON.stringify({email})});
+    assert.equal(request.status,200);
+    assert.equal(request.data.resetCodePreview,undefined);
+    const code = await readMailboxCode(email);
+    const reset = await e2eFetch('/api/auth/reset-password',{method:'POST',
+      body:JSON.stringify({ email, code, newPassword:'LegacyQA123!' }) });
+    assert.equal(reset.status,200);
+    assert.equal(reset.data.user.email,email);
   });
 });

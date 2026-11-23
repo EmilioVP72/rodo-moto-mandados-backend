@@ -13,6 +13,7 @@ import {
   hashSecretSha256,
   timingSafeCompareHex,
   generateSixDigitResetCode,
+  generateSecureRefreshToken,
   extractUserFromRequest,
 } from '../../middlewares/auth.js';
 import { emitAdminEvent } from '../../infra/socket.js';
@@ -22,6 +23,7 @@ import {
   maskIneDigits,
   encryptIneDigits,
   normalizeIneDigits,
+  decryptIneDigits,
 } from '../../utils/ineCrypto.js';
 
 const BCRYPT_ROUNDS = 12;
@@ -284,7 +286,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const lookupEmail = isAdminAlias ? env.ADMIN_EMAIL.toLowerCase() : cleanIdentifier;
     const phoneDigits = cleanIdentifier.replace(/[^0-9]/g, '');
 
-    let user = await prisma.user.findFirst({
+    const user = await prisma.user.findFirst({
       where: {
         OR: [
           { email: lookupEmail },
@@ -293,36 +295,6 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       },
       include: { coupons: true, addresses: true, favorites: true },
     });
-
-    // Migración automática si el soporte aprobó una solicitud de cambio de correo
-    if (!user && !isAdminAlias) {
-      const approvedRecovery = await prisma.accountRecoveryRequest.findFirst({
-        where: { newEmail: lookupEmail, status: 'aprobada' },
-      });
-
-      if (approvedRecovery) {
-        const passwordHash = await bcrypt.hash(cleanPass, BCRYPT_ROUNDS);
-        const recPhone = approvedRecovery.phone.replace(/[^0-9]/g, '');
-        const preparedRecIne = prepareIneForStorage(approvedRecovery.ine10Digits);
-        user = await prisma.user.create({
-          data: {
-            id: `cust-${recPhone || Date.now()}`,
-            name: approvedRecovery.customerName,
-            phone: approvedRecovery.phone,
-            email: lookupEmail,
-            passwordHash,
-            role: 'CUSTOMER',
-            ineVerified: true,
-            ine10Digits: preparedRecIne?.encrypted || null,
-            ine10DigitsHash: preparedRecIne?.hash || null,
-            inePhotoUploaded: true,
-            ineVerifiedAt: new Date(),
-            status: 'activo',
-          },
-          include: { coupons: true, addresses: true, favorites: true },
-        });
-      }
-    }
 
     if (!user) {
       return reply.status(401).send({
@@ -494,7 +466,26 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     const mail = resetMailTransport();
     if (!mail) return reply.code(503).send({ error: 'La recuperación por correo está temporalmente fuera de servicio.' });
-    const user = await prisma.user.findUnique({ where: { email: parsed.data.email.toLowerCase() } });
+    const email = parsed.data.email.toLowerCase();
+    let user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      // Solicitudes aprobadas de la instalación anterior pueden no tener cuenta relacional.
+      const legacy = await prisma.accountRecoveryRequest.findFirst({
+        where: { newEmail: email, status: 'aprobada', userId: null }, orderBy: { storedAt: 'desc' },
+      });
+      if (legacy) {
+        const identity = prepareIneForStorage(decryptIneDigits(legacy.ine10Digits));
+        await prisma.user.createMany({ data: [{
+          name: legacy.customerName, email, phone: legacy.phone,
+          passwordHash: await bcrypt.hash(generateSecureRefreshToken(), BCRYPT_ROUNDS),
+          role: 'CUSTOMER', ine10Digits: identity?.encrypted, ine10DigitsHash: identity?.hash,
+        }], skipDuplicates: true });
+        user = await prisma.user.findUnique({ where: { email } });
+        if (user) await prisma.accountRecoveryRequest.updateMany({
+          where: { id: legacy.id, userId: null }, data: { userId: user.id },
+        });
+      }
+    }
     if (!user) return reply.send(recoveryReceipt);
     const code = generateSixDigitResetCode();
     const token = await prisma.$transaction(async tx => {
