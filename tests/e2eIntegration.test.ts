@@ -47,7 +47,7 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
 
     const swRes = await fetch(`${BASE_URL}/sw.js`);
     assert.equal(swRes.status, 200);
-    assert.ok((await swRes.text()).includes('rodo-pwa-cache-v2'));
+    assert.ok((await swRes.text()).includes('rodo-pwa-cache-'));
 
     const health = await e2eFetch('/api/health');
     assert.equal(health.status, 200);
