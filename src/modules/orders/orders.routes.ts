@@ -1,3 +1,4 @@
+import { dailyReceipts } from '../../utils/dailyReceipts.js';
 import { FastifyInstance } from 'fastify';
 import { prisma } from '../../infra/prisma.js';
 import { emitOrderEvent, emitAdminEvent } from '../../infra/socket.js';
@@ -107,6 +108,17 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
   // =========================================================================
   // 1.5 REGISTRO HISTÓRICO COMPLETO DE PEDIDOS (EXCLUSIVO ADMINISTRADOR)
   // =========================================================================
+  app.get('/api/admin/daily-receipts', { preHandler: [requireAdmin] }, async () => {
+    const now = new Date();
+    const rows = await prisma.order.findMany({
+      where: { updatedAt: { gte: new Date(now.getTime() - 36 * 3600000) } },
+      select: { status: true, orderType: true, paymentMethod: true, paymentStatus: true, total: true, subtotal: true,
+        commissionAmount: true, payload: true, statusHistory: { where: { toStatus: { in: ['entregado', 'cancelado_con_deuda'] } },
+          orderBy: { createdAt: 'desc' }, select: { toStatus: true, createdAt: true } } },
+    });
+    return dailyReceipts(rows, now);
+  });
+
   app.get('/api/admin/orders/history', { preHandler: [requireAdmin] }, async (request, reply) => {
     const {
       search,
@@ -681,7 +693,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     if (isAdmin && updates.paymentStatus === 'verificado') {
       if (existing.paymentMethod !== 'transferencia') return reply.status(422).send({ error: 'La orden no es por transferencia.' });
       updates.bankVerification = { trackingKey: existing.speiTrackingKey || prevPayload.bankVerification?.trackingKey || '',
-        verified: true, verifiedAt: nowIso, verifiedAmount: existing.total,
+        verified: true, verifiedAt: existing.paymentStatus === 'verificado' ? prevPayload.bankVerification?.verifiedAt ?? nowIso : nowIso, verifiedAmount: existing.total,
         statusMessage: 'Depósito confirmado por despacho.' };
     }
     if (isAdmin && existing.status === 'pendiente_cotizacion' && updates.deliveryFee !== undefined) {
