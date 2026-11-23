@@ -115,6 +115,13 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
   });
 
   it('4. Registra Cliente A y Cliente B en PostgreSQL, bloquea INE deudor y protege endpoints Admin (403)', async () => {
+    const debtor = { name: 'Cuenta de prueba', phone: '4153' + runId, email: 'bloqueo.' + runId + '@example.invalid',
+      password: 'Pruebas123!', ine10Digits: makeValidIne10(runId, '693') };
+    const registered = await e2eFetch('/api/auth/register', { method: 'POST', body: JSON.stringify(debtor) });
+    assert.equal(registered.status, 201);
+    const blocked = await e2eFetch('/api/auth/blocked-customers', { method: 'POST',
+      headers: { Authorization: 'Bearer ' + adminToken }, body: JSON.stringify({ identifier: debtor.email }) });
+    assert.equal(blocked.status, 201);
     const debtorAttempt = await e2eFetch('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify({
@@ -122,7 +129,7 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
         phone: '4151998877',
         email: `deudor.${runId}@ejemplo.com`,
         password: 'Password123!',
-        ine10Digits: '8942105434',
+        ine10Digits: debtor.ine10Digits,
       }),
     });
     assert.equal(debtorAttempt.status, 403);
@@ -360,7 +367,7 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
     assert.equal(afterLogoutMe.status, 401);
   });
 
-  it('8. Admin puede ver todas las órdenes, completar entrega y activar/desactivar Pausa por Lluvia (503)', async () => {
+  it('8. Admin puede ver todas las órdenes, consultar histórico y activar/desactivar Pausa por Lluvia (503)', async () => {
     const adminOrders = await e2eFetch('/api/orders', {
       headers: { Authorization: `Bearer ${adminToken}` },
     });
@@ -418,5 +425,72 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
       body: JSON.stringify({ rainPauseEnabled: false }),
     });
     assert.equal(disableRain.status, 200);
+  });
+
+  function options(token: string, method = 'GET', body?: object) {
+    return { method, headers: { Authorization: 'Bearer ' + token }, body: body && JSON.stringify(body) };
+  }
+
+  it('9. La identidad capturada cambia a revisada después del cotejo de despacho', async () => {
+    const me = await e2eFetch('/api/auth/me', options(customerBToken));
+    assert.equal(me.data.user.ineVerified, false);
+    const review = await e2eFetch('/api/auth/accounts/' + me.data.user.id + '/identity-review',
+      options(adminToken, 'POST', { digits: makeValidIne10(runId, '852'), checkedOriginal: true }));
+    assert.equal(review.status, 200);
+    assert.equal((await e2eFetch('/api/auth/me', options(customerBToken))).data.user.ineVerified, true);
+  });
+
+  it('10. Un comercio despacha con folio y el cupón personal se consume una sola vez', async () => {
+    const me = await e2eFetch('/api/auth/me', options(customerBToken));
+    const code = me.data.user.coupons[0].code;
+    const order = { restaurantId: 'tacos-sebas', restaurantName: 'Tacos Sebastián', items: [{id:'ts-1',quantity:1}],
+      deliveryAddress: 'Calle Correo 14, Centro', promoCode: code, paymentMethod: 'efectivo' };
+    const attempts = await Promise.all(['a','b'].map(suffix => e2eFetch('/api/dispatch-order',
+      options(customerBToken, 'POST', {...order, id:'qa-coupon-' + runId + suffix}))));
+    const created = attempts.filter(r => r.status === 201);
+    assert.equal(created.length, 1);
+    assert.ok(attempts.some(r => [409,422].includes(r.status)));
+    assert.equal(created[0].data.total, 100);
+    assert.ok(created[0].data.folio.startsWith('RD-'));
+    const history = await e2eFetch('/api/admin/orders/history?search=' + created[0].data.folio, options(adminToken));
+    assert.ok(history.data.orders.some((o: any) => o.folio === created[0].data.folio));
+    assert.equal((await e2eFetch('/api/auth/me', options(customerBToken))).data.user.coupons[0].used, true);
+  });
+
+  it('11. El corte solo incorpora el SPEI al confirmar y la entrega actualiza el crédito', async () => {
+    const cut = async () => (await e2eFetch('/api/admin/daily-receipts', options(adminToken))).data;
+    const before = await cut();
+    const orderPath = '/api/orders/' + orderAId;
+    assert.equal((await e2eFetch(orderPath, options(adminToken))).data.paymentStatus, 'pendiente');
+    assert.equal((await e2eFetch(orderPath, options(adminToken,'PATCH',{paymentStatus:'verificado'}))).status,200);
+    assert.equal((await cut()).totalTransfer - before.totalTransfer, 235);
+    const rider = await e2eFetch('/api/admin/riders', options(adminToken,'POST',{name:'Moto QA',phone:'4154'+runId,
+      email:'rider.'+runId+'@example.invalid',password:'RiderQA123!'}));
+    assert.equal(rider.status,201);
+    assert.equal((await e2eFetch(orderPath, options(adminToken,'PATCH',{assignedRiderUserId:rider.data.id}))).status,200);
+    for (const status of ['recolectado','en_camino','afuera_del_domicilio','entregado']) {
+      assert.equal((await e2eFetch(orderPath, options(adminToken,'PATCH',{status}))).status,200);
+    }
+    const users = await e2eFetch('/api/auth/accounts', options(adminToken));
+    const owner = users.data.find((u: any) => u.id === customerAId);
+    assert.equal(owner.completedOrdersCount,1);
+    assert.equal(owner.cashLimit,400);
+    assert.equal((await cut()).totalTransfer - before.totalTransfer,235);
+  });
+
+  it('12. Una campaña futura queda privada hasta que vence su programación', async () => {
+    const id = 'qa-programada-' + runId;
+    const post = await e2eFetch('/api/broadcasts',options(adminToken,'POST',{id,title:'Aviso de prueba',message:'Prueba',
+      scheduledFor:new Date(Date.now()+2500).toISOString(),sendImmediately:false}));
+    assert.equal(post.status,201);
+    const contains = async (path: string, token: string) =>
+      (await e2eFetch(path,options(token))).data.filter((n: any) => n.id === id).length;
+    assert.equal(await contains('/api/admin/broadcasts',adminToken),1);
+    assert.equal(await contains('/api/broadcasts',customerBToken),0);
+    const deadline = Date.now()+12000;
+    while (Date.now()<deadline && !await contains('/api/broadcasts',customerBToken)) {
+      await new Promise(resolve=>setTimeout(resolve,300));
+    }
+    assert.equal(await contains('/api/broadcasts',customerBToken),1);
   });
 });
