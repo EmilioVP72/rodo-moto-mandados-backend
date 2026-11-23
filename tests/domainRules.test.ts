@@ -7,7 +7,7 @@ import {
   validateSpeiTrackingKeyFormat,
   validateGpsCoordinates,
   getRiderGpsPing,
-  canRiderTransitionOrderStatus,
+  canRiderTransitionOrderStatus, allowedOrderTransitions,
 } from '../src/utils/domainRules.ts';
 
 describe('Backend Domain Rules & Security Unit Tests', () => {
@@ -168,4 +168,22 @@ it('cobra el combustible al precio configurado y deja el viaje para cotización 
     liters: 2, fuelType: 'premium', fuelPricePerLiter: 27, fuelTotal: 54, serviceTravelFee: 0,
   });
   assert.throws(() => priceFuelRequest(0, 'premium', {}));
+});
+
+describe('Transiciones autorizadas por rol', () => {
+  const order = { status: 'nuevo', assignedRiderUserId: 'r1', paymentMethod: 'efectivo', paymentStatus: 'en_efectivo' };
+  it('despacho asigna desde nuevo pero no puede saltar a entregado', () => {
+    assert.ok(allowedOrderTransitions('ADMIN', order).includes('asignado'));
+    assert.ok(!allowedOrderTransitions('ADMIN', order).includes('entregado'));
+    assert.ok(!allowedOrderTransitions('ADMIN', {...order, assignedRiderUserId: null}).includes('asignado'));
+  });
+  it('cliente acepta una cotización emitida y confirma entrega al llegar', () => {
+    assert.deepEqual(allowedOrderTransitions('CUSTOMER', {...order, status:'pendiente_cotizacion'}), ['cancelado']);
+    assert.ok(allowedOrderTransitions('CUSTOMER', {...order, status:'pendiente_cotizacion', quoteOffered:true}).includes('nuevo'));
+    assert.deepEqual(allowedOrderTransitions('CUSTOMER', {...order, status:'afuera_del_domicilio'}), ['entregado']);
+  });
+  it('mantiene cerrados los estados finales y exige pago para repartir una transferencia', () => {
+    for (const role of ['ADMIN','CUSTOMER','RIDER']) assert.deepEqual(allowedOrderTransitions(role, {...order, status:'entregado'}), []);
+    assert.deepEqual(allowedOrderTransitions('RIDER', {...order, status:'asignado', paymentMethod:'transferencia', paymentStatus:'pendiente'}), []);
+  });
 });

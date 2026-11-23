@@ -81,6 +81,38 @@ export function canRiderTransitionOrderStatus(fromStatus: string, toStatus: stri
   return RIDER_STATUS_TRANSITIONS[fromStatus]?.includes(toStatus) ?? false;
 }
 
+const ADMIN_TRANSITIONS: Record<string, readonly string[]> = {
+  pendiente_cotizacion: ['cancelado'],
+  nuevo: ['en_preparacion', 'asignado', 'cancelado'],
+  en_preparacion: ['asignado', 'cancelado'],
+  asignado: ['nuevo', 'recolectado', 'cancelado'],
+  recolectado: ['en_camino', 'cancelado'],
+  en_camino: ['afuera_del_domicilio', 'cancelado'],
+  afuera_del_domicilio: ['entregado', 'cancelado', 'cancelado_con_deuda'],
+  entregado: [], cancelado: [], cancelado_con_deuda: [],
+};
+
+export function isOrderStatus(status: string) { return Object.hasOwn(ADMIN_TRANSITIONS, status); }
+
+export function allowedOrderTransitions(role: string, order: {
+  status: string; assignedRiderUserId?: string | null; paymentMethod: string;
+  paymentStatus: string; quoteOffered?: boolean;
+}): readonly string[] {
+  if (!isOrderStatus(order.status)) return [];
+  if (role === 'CUSTOMER' || role === 'PARTNER_LOCAL') {
+    if (order.status === 'pendiente_cotizacion') return order.quoteOffered ? ['nuevo', 'cancelado'] : ['cancelado'];
+    if (order.status !== 'afuera_del_domicilio') return [];
+    return order.paymentMethod === 'transferencia' && order.paymentStatus !== 'verificado' ? [] : ['entregado'];
+  }
+  const targets = role === 'ADMIN' ? ADMIN_TRANSITIONS[order.status] : role === 'RIDER' ? RIDER_STATUS_TRANSITIONS[order.status] || [] : [];
+  return targets.filter(to => {
+    if (['asignado','recolectado','en_camino','afuera_del_domicilio','entregado'].includes(to)) {
+      return Boolean(order.assignedRiderUserId) && (order.paymentMethod !== 'transferencia' || order.paymentStatus === 'verificado');
+    }
+    return true;
+  });
+}
+
 export function validateSpeiTrackingKeyFormat(rawKey: string): {
   valid: boolean;
   cleanKey: string;

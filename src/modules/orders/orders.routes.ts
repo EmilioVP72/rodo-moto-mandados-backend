@@ -3,6 +3,7 @@ import { prisma } from '../../infra/prisma.js';
 import { emitOrderEvent, emitAdminEvent } from '../../infra/socket.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
 import {
+  allowedOrderTransitions, isOrderStatus,
   getServerCustomerCashLimit,
   validateSpeiTrackingKeyFormat,
 
@@ -66,6 +67,7 @@ export function mapOrderRowToPayload(row: any) {
     assignedRiderName: row.assignedRiderName || undefined,
     assignedRiderPhone: row.assignedRiderPhone || undefined,
     assignedRiderUserId: row.assignedRiderUserId || undefined,
+    adminNextStatuses: allowedOrderTransitions('ADMIN', row),
     statusHistory: Array.isArray(row.statusHistory) ? row.statusHistory : undefined,
     createdAt: (payload.createdAt as string) || row.createdAt.toISOString(),
     updatedAt: (payload.updatedAt as string) || row.updatedAt.toISOString(),
@@ -513,6 +515,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
               fromStatus: null,
               toStatus: initialStatus,
               changedByUserId: authUser.sub,
+              changedByRole: authUser.role,
               note: `Pedido creado (${body.paymentMethod || 'efectivo'})`,
             },
           },
@@ -559,6 +562,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'No se enviaron órdenes en el lote.' });
     }
 
+    if (orders.some(o => !isOrderStatus(String(o.status || 'nuevo')))) return reply.status(422).send({ error: 'Estado desconocido.' });
     const adminId = request.authUser!.sub;
 
     await prisma.$transaction(
@@ -567,15 +571,12 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
         const folio = String(o.folio || `RD-${orderId}`);
         return prisma.order.upsert({
           where: { id: orderId },
-          update: {
-            status: String(o.status || 'nuevo'),
-            total: Number(o.total || 0),
-            payload: { ...o, id: orderId, folio },
-          },
+          update: {}, // Un reintento no sobrescribe el historial ni el estado.
           create: {
             id: orderId,
             folio,
             orderType: String(o.orderType || 'comida'),
+            statusHistory: { create: { fromStatus: null, toStatus: String(o.status || 'nuevo'), changedByUserId: adminId, changedByRole: 'ADMIN', note: 'Importación administrativa' } },
             customerId: adminId,
             customerName: String(o.customerName || 'Cliente Simulación'),
             customerPhone: String(o.customerPhone || '4150000000'),
@@ -630,13 +631,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
           updates[key] = value;
         }
       }
-      // Un cliente solo puede cambiar estatus para confirmar recepción ('entregado') o aceptar/rechazar cotización
-      if (updates.status !== undefined) {
-        const allowedCustomerTargetStatuses = new Set(['entregado', 'nuevo', 'cancelado']);
-        if (!allowedCustomerTargetStatuses.has(String(updates.status))) {
-          delete updates.status;
-        }
-      }
+
     }
 
     let assignedRiderUserId = existing.assignedRiderUserId;
@@ -658,7 +653,8 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       assignedRiderPhone = rider?.phone || null;
       updates.assignedRiderName = assignedRiderName;
       updates.assignedRiderPhone = assignedRiderPhone;
-      if (requestedRiderId && updates.status === undefined) updates.status = 'asignado';
+      if (requestedRiderId && updates.status === undefined && ['nuevo','en_preparacion'].includes(existing.status)) updates.status = 'asignado';
+      if (!requestedRiderId && ['recolectado','en_camino','afuera_del_domicilio'].includes(existing.status)) return reply.status(409).send({ error: 'Reasigna el pedido a otra cuenta activa.' });
       if (!requestedRiderId && existing.status === 'asignado' && updates.status === undefined) {
         updates.status = 'nuevo';
       }
@@ -671,6 +667,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     const now = new Date();
     const nowIso = now.toISOString();
     const prevPayload = (existing.payload || {}) as Record<string, any>;
+    delete updates.quoteOfferedAt;
     if (isAdmin && updates.paymentStatus === 'verificado') {
       if (existing.paymentMethod !== 'transferencia') return reply.status(422).send({ error: 'La orden no es por transferencia.' });
       updates.bankVerification = { trackingKey: existing.speiTrackingKey || prevPayload.bankVerification?.trackingKey || '',
@@ -696,9 +693,21 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
 
     const nextStatus = updates.status !== undefined ? String(updates.status) : existing.status;
 
+    const quoteOffered = Boolean(prevPayload.quoteOfferedAt || (existing.orderType !== 'auxilio_gasolina' && existing.subtotal > 0));
+    const allowed = allowedOrderTransitions(authUser.role, { ...existing, assignedRiderUserId, quoteOffered });
+    if (nextStatus !== existing.status && !allowed.includes(nextStatus)) {
+      return reply.status(409).send({ error: 'El cambio de estado no está permitido para este pedido y rol.' });
+    }
+    if (!isAdmin && updates.quoteConfirmedByCustomer === true &&
+        !(existing.status === 'pendiente_cotizacion' && nextStatus === 'nuevo' && quoteOffered)) {
+      return reply.status(409).send({ error: 'Primero despacho debe emitir la cotización.' });
+    }
+    if (!isAdmin && existing.status === 'pendiente_cotizacion' && nextStatus === 'nuevo' && updates.quoteConfirmedByCustomer !== true) {
+      return reply.status(409).send({ error: 'Confirma la cotización antes de continuar.' });
+    }
     const updated = await prisma.$transaction(async (tx) => {
-      const updatedOrder = await tx.order.update({
-        where: { id },
+      const changed = await tx.order.updateMany({
+        where: { id, status: existing.status, updatedAt: existing.updatedAt },
         data: {
           status: nextStatus,
           paymentStatus:
@@ -726,12 +735,15 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
               : existing.assignedRiderUserId,
           payload: mergedPayload,
         },
-        include: {
-          items: true,
-          statusHistory: { orderBy: { createdAt: 'desc' }, take: 10 },
-        },
       });
+      if (!changed.count) return null;
 
+      if (isAdmin && updates.quoteOfferedAt && Array.isArray(updates.items)) {
+        await tx.orderItem.deleteMany({ where: { orderId: id } });
+        await tx.orderItem.create({ data: { orderId: id, productId: 'it-quoted',
+          name: existing.orderType === 'auxilio_gasolina' ? 'Combustible' : 'Artículos cotizados',
+          quantity: 1, unitPrice: updates.subtotal } });
+      }
       if (nextStatus !== existing.status) {
         await tx.orderStatusHistory.create({
           data: {
@@ -739,6 +751,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
             fromStatus: existing.status,
             toStatus: nextStatus,
             changedByUserId: authUser.sub,
+              changedByRole: authUser.role,
             note: updates.cancellationReason || (isAdmin ? 'Actualizado por Despacho' : 'Confirmado por Cliente'),
           },
         });
@@ -753,7 +766,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       }
 
       // Si el administrador marca cancelación con adeudo, bloquear cuenta y revocar sesiones activas
-      if (isAdmin && nextStatus === 'cancelado_con_deuda') {
+      if (isAdmin && existing.status !== nextStatus && nextStatus === 'cancelado_con_deuda') {
         const debtAmount = Number(updates.cancellationDebtAmount ?? existing.total);
         await tx.user.update({
           where: { id: existing.customerId },
@@ -772,8 +785,10 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      return updatedOrder;
+      return tx.order.findUniqueOrThrow({ where: { id }, include: { items: true, statusHistory: { orderBy: { createdAt: 'desc' }, take: 10 } } });
     });
+
+    if (!updated) return reply.status(409).send({ error: 'Otro usuario cambió el pedido. Actualiza e inténtalo de nuevo.' });
 
     const mapped = mapOrderRowToPayload(updated);
     emitOrderEvent('orders:updated', mapped);

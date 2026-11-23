@@ -261,6 +261,7 @@ model OrderStatusHistory {
   fromStatus      String?
   toStatus        String
   changedByUserId String?
+  changedByRole   UserRole?
   note            String?
   createdAt       DateTime @default(now())
 

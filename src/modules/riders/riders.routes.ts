@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { requireAdmin, requireRider } from '../../middlewares/auth.js';
 import { prisma } from '../../infra/prisma.js';
 import { emitOrderEvent, emitAdminEvent } from '../../infra/socket.js';
-import { canRiderTransitionOrderStatus } from '../../utils/domainRules.js';
+import { allowedOrderTransitions } from '../../utils/domainRules.js';
 import { mapOrderRowToPayload } from '../orders/orders.routes.js';
 
 const riderPasswordRounds = 12;
@@ -85,7 +85,7 @@ export async function ridersRoutes(app: FastifyInstance): Promise<void> {
     if (existing.assignedRiderUserId !== riderId) {
       return reply.status(403).send({ error: 'Este pedido no está asignado a tu cuenta.' });
     }
-    if (!canRiderTransitionOrderStatus(existing.status, parsed.data.status)) {
+    if (!allowedOrderTransitions('RIDER', existing).includes(parsed.data.status)) {
       return reply.status(409).send({ error: `No puedes cambiar el pedido de ${existing.status} a ${parsed.data.status}.` });
     }
 
@@ -96,7 +96,7 @@ export async function ridersRoutes(app: FastifyInstance): Promise<void> {
         where: {
           id,
           assignedRiderUserId: riderId,
-          status: existing.status,
+          status: existing.status, updatedAt: existing.updatedAt,
         },
         data: {
           status: parsed.data.status,
@@ -104,6 +104,7 @@ export async function ridersRoutes(app: FastifyInstance): Promise<void> {
             ...previousPayload,
             status: parsed.data.status,
             updatedAt: now.toISOString(),
+            ...(parsed.data.status === 'afuera_del_domicilio' ? { arrivalNotifiedAt: now.toISOString(), arrivalExpiresAt: new Date(now.getTime() + 600000).toISOString(), customerNotifiedOutside: true } : {}),
             ...(parsed.data.deliveryNotes ? { deliveryNotes: parsed.data.deliveryNotes } : {}),
           },
         },
@@ -115,6 +116,7 @@ export async function ridersRoutes(app: FastifyInstance): Promise<void> {
           fromStatus: existing.status,
           toStatus: parsed.data.status,
           changedByUserId: riderId,
+          changedByRole: 'RIDER',
           note: parsed.data.deliveryNotes || 'Actualizado por repartidor asignado',
         },
       });
