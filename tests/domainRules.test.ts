@@ -6,6 +6,7 @@ import {
   validateSpeiTrackingKeyFormat,
   recalculateOrderTotalsServer,
   validateGpsCoordinates,
+  canRiderTransitionOrderStatus,
 } from '../src/utils/domainRules.ts';
 
 describe('Backend Domain Rules & Security Unit Tests', () => {
@@ -157,6 +158,22 @@ describe('Backend Domain Rules & Security Unit Tests', () => {
       const check = validateGpsCoordinates(19.4326, -99.1332); // CDMX
       assert.equal(check.valid, true);
       assert.equal(check.isWithinSmaRegion, false);
+    });
+  });
+
+  describe('6. Rider order status transitions', () => {
+    it('permits only the assigned rider delivery progression', () => {
+      assert.equal(canRiderTransitionOrderStatus('asignado', 'recolectado'), true);
+      assert.equal(canRiderTransitionOrderStatus('recolectado', 'en_camino'), true);
+      assert.equal(canRiderTransitionOrderStatus('en_camino', 'afuera_del_domicilio'), true);
+      assert.equal(canRiderTransitionOrderStatus('afuera_del_domicilio', 'entregado'), true);
+    });
+
+    it('rejects skipped, reversed, and administrative transitions', () => {
+      assert.equal(canRiderTransitionOrderStatus('asignado', 'entregado'), false);
+      assert.equal(canRiderTransitionOrderStatus('en_camino', 'asignado'), false);
+      assert.equal(canRiderTransitionOrderStatus('entregado', 'en_camino'), false);
+      assert.equal(canRiderTransitionOrderStatus('nuevo', 'cancelado'), false);
     });
   });
 });

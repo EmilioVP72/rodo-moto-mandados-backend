@@ -132,3 +132,21 @@ export async function requireAdmin(request: FastifyRequest, reply: FastifyReply)
     return;
   }
 }
+
+export async function requireRider(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  await requireAuth(request, reply);
+  if (reply.sent) return;
+
+  if (!request.authUser || request.authUser.role !== 'RIDER') {
+    reply.status(403).send({ error: 'Acceso restringido a cuentas de repartidor.' });
+    return;
+  }
+
+  const rider = await prisma.user.findFirst({
+    where: { id: request.authUser.sub, role: 'RIDER', status: 'activo' },
+    select: { id: true },
+  });
+  if (!rider) {
+    reply.status(403).send({ error: 'La cuenta de repartidor está inactiva.' });
+  }
+}

@@ -70,6 +70,17 @@ export function getServerCustomerCashLimit(completedOrdersCount: number): number
   return 1000;
 }
 
+const RIDER_STATUS_TRANSITIONS: Record<string, readonly string[]> = {
+  asignado: ['recolectado'],
+  recolectado: ['en_camino'],
+  en_camino: ['afuera_del_domicilio'],
+  afuera_del_domicilio: ['entregado'],
+};
+
+export function canRiderTransitionOrderStatus(fromStatus: string, toStatus: string): boolean {
+  return RIDER_STATUS_TRANSITIONS[fromStatus]?.includes(toStatus) ?? false;
+}
+
 export function validateSpeiTrackingKeyFormat(rawKey: string): {
   valid: boolean;
   cleanKey: string;

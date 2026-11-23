@@ -55,6 +55,7 @@ model User {
   orders           Order[]
   recoveryRequests AccountRecoveryRequest[]
   auditLogs        AuditLog[]
+  assignedOrders   Order[]       @relation("AssignedRiderOrders")
 
   @@index([phone])
   @@index([role])
@@ -216,12 +217,14 @@ model Order {
   status             String   @default("nuevo")
   assignedRiderName  String?
   assignedRiderPhone String?
+  assignedRiderUserId String?
   payload            Json
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
   // Integridad referencial y aislamiento estricto por dueño
   customer      User                 @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  assignedRider User?                @relation("AssignedRiderOrders", fields: [assignedRiderUserId], references: [id], onDelete: SetNull)
   restaurant    Restaurant?          @relation(fields: [restaurantRefId], references: [id], onDelete: SetNull)
   items         OrderItem[]
   statusHistory OrderStatusHistory[]
@@ -229,6 +232,7 @@ model Order {
   @@index([customerId, createdAt(sort: Desc)])
   @@index([status])
   @@index([createdAt(sort: Desc)])
+  @@index([assignedRiderUserId, status])
   @@map("orders")
 }
 

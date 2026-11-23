@@ -26,7 +26,7 @@ const CUSTOMER_ALLOWED_PATCH_FIELDS = new Set([
   'status',
 ]);
 
-function mapOrderRowToPayload(row: any) {
+export function mapOrderRowToPayload(row: any) {
   const payload = (row.payload || {}) as Record<string, unknown>;
   const relationalItems = Array.isArray(row.items) && row.items.length > 0
     ? row.items.map((it: any) => ({
@@ -62,6 +62,7 @@ function mapOrderRowToPayload(row: any) {
     status: row.status,
     assignedRiderName: row.assignedRiderName || undefined,
     assignedRiderPhone: row.assignedRiderPhone || undefined,
+    assignedRiderUserId: row.assignedRiderUserId || undefined,
     statusHistory: Array.isArray(row.statusHistory) ? row.statusHistory : undefined,
     createdAt: (payload.createdAt as string) || row.createdAt.toISOString(),
     updatedAt: (payload.updatedAt as string) || row.updatedAt.toISOString(),
@@ -470,8 +471,9 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
           speiTrackingKey: cleanSpeiKey,
           deliveryAddress: String(body.deliveryAddress || ''),
           status: initialStatus,
-          assignedRiderName: body.assignedRiderName || null,
-          assignedRiderPhone: body.assignedRiderPhone || null,
+          assignedRiderName: authUser.role === 'ADMIN' ? body.assignedRiderName || null : null,
+          assignedRiderPhone: authUser.role === 'ADMIN' ? body.assignedRiderPhone || null : null,
+          assignedRiderUserId: authUser.role === 'ADMIN' ? body.assignedRiderUserId || null : null,
           payload: fullPayload,
           items: {
             create: items.map((it: any) => {
@@ -621,6 +623,35 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
+    let assignedRiderUserId = existing.assignedRiderUserId;
+    let assignedRiderName = existing.assignedRiderName;
+    let assignedRiderPhone = existing.assignedRiderPhone;
+    if (isAdmin && updates.assignedRiderUserId !== undefined) {
+      const requestedRiderId = updates.assignedRiderUserId ? String(updates.assignedRiderUserId) : null;
+      const rider = requestedRiderId
+        ? await prisma.user.findFirst({
+            where: { id: requestedRiderId, role: 'RIDER', status: 'activo' },
+            select: { id: true, name: true, phone: true },
+          })
+        : null;
+      if (requestedRiderId && !rider) {
+        return reply.status(422).send({ error: 'La cuenta de repartidor no existe o está inactiva.' });
+      }
+      assignedRiderUserId = rider?.id || null;
+      assignedRiderName = rider?.name || null;
+      assignedRiderPhone = rider?.phone || null;
+      updates.assignedRiderName = assignedRiderName;
+      updates.assignedRiderPhone = assignedRiderPhone;
+      if (requestedRiderId && updates.status === undefined) updates.status = 'asignado';
+      if (!requestedRiderId && existing.status === 'asignado' && updates.status === undefined) {
+        updates.status = 'nuevo';
+      }
+    }
+
+    if (isAdmin && updates.status === 'asignado' && !assignedRiderUserId) {
+      return reply.status(422).send({ error: 'Asigna una cuenta activa de repartidor antes de marcar el pedido como asignado.' });
+    }
+
     const now = new Date();
     const nowIso = now.toISOString();
     const prevPayload = (existing.payload || {}) as Record<string, any>;
@@ -650,13 +681,17 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
               : existing.deliveryFee,
           total: isAdmin && updates.total !== undefined ? Number(updates.total) : existing.total,
           assignedRiderName:
-            isAdmin && updates.assignedRiderName !== undefined
-              ? updates.assignedRiderName
+            isAdmin && (updates.assignedRiderUserId !== undefined || updates.assignedRiderName !== undefined)
+              ? assignedRiderName
               : existing.assignedRiderName,
           assignedRiderPhone:
-            isAdmin && updates.assignedRiderPhone !== undefined
-              ? updates.assignedRiderPhone
+            isAdmin && (updates.assignedRiderUserId !== undefined || updates.assignedRiderPhone !== undefined)
+              ? assignedRiderPhone
               : existing.assignedRiderPhone,
+          assignedRiderUserId:
+            isAdmin && updates.assignedRiderUserId !== undefined
+              ? assignedRiderUserId
+              : existing.assignedRiderUserId,
           payload: mergedPayload,
         },
         include: {

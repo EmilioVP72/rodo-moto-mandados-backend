@@ -41,7 +41,7 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
       socket.data.user = verifiedUser;
       if (verifiedUser.role === 'ADMIN') {
         socket.join('room:admin');
-      } else {
+      } else if (verifiedUser.role === 'CUSTOMER') {
         socket.join(`room:customer:${verifiedUser.sub}`);
       }
     }
@@ -56,7 +56,7 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
       socket.data.user = user;
       if (user.role === 'ADMIN') {
         socket.join('room:admin');
-      } else {
+      } else if (user.role === 'CUSTOMER') {
         socket.join(`room:customer:${user.sub}`);
       }
     });
@@ -86,18 +86,36 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
     socket.on(
       'rider:location',
       async (payload: { orderId: string; lat: number; lng: number; riderName?: string }) => {
+        const user = socket.data.user;
+        if (!user || user.role !== 'RIDER') return;
         if (!payload?.orderId) return;
         const check = validateGpsCoordinates(payload.lat, payload.lng);
         if (!check.valid) return;
 
-        const existing = await prisma.order.findUnique({ where: { id: String(payload.orderId) } });
+        if (user.sid) {
+          const session = await prisma.refreshSession.findUnique({
+            where: { id: user.sid },
+            select: { revokedAt: true, expiresAt: true },
+          });
+          if (!session || session.revokedAt || session.expiresAt < new Date()) return;
+        }
+
+        const rider = await prisma.user.findFirst({
+          where: { id: user.sub, role: 'RIDER', status: 'activo' },
+          select: { id: true, name: true },
+        });
+        if (!rider) return;
+
+        const existing = await prisma.order.findFirst({
+          where: { id: String(payload.orderId), assignedRiderUserId: rider.id },
+        });
         if (!existing) return;
 
         const nowIso = new Date().toISOString();
         const locationEvent = {
           orderId: existing.id,
           coordinates: { lat: check.lat, lng: check.lng },
-          riderName: payload.riderName,
+          riderName: rider.name,
           timestamp: nowIso,
         };
 
@@ -145,10 +163,11 @@ export function broadcastEvent(event: string, data: unknown): void {
 /**
  * Emisión aislada por privacidad: solo el cliente propietario de la orden y los administradores reciben el evento.
  */
-export function emitOrderEvent(event: string, order: { id: string; customerId: string }): void {
+export function emitOrderEvent(event: string, order: { id: string; customerId: string; assignedRiderUserId?: string | null }): void {
   if (!io || !order?.customerId) return;
   io.to('room:admin')
     .to(`room:customer:${order.customerId}`)
+    .to(`room:rider:${order.assignedRiderUserId || ''}`)
     .to(`room:order:${order.id}`)
     .emit(event, order);
 }

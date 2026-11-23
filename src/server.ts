@@ -17,6 +17,7 @@ import { settingsRoutes } from './modules/settings/settings.routes.js';
 import { notificationsRoutes } from './modules/notifications/notifications.routes.js';
 import { routingRoutes } from './modules/routing/routing.routes.js';
 import { uploadsRoutes } from './modules/uploads/uploads.routes.js';
+import { ridersRoutes } from './modules/riders/riders.routes.js';
 
 async function bootstrap() {
   const app = Fastify({
@@ -132,6 +133,7 @@ async function bootstrap() {
   await app.register(notificationsRoutes);
   await app.register(routingRoutes);
   await app.register(uploadsRoutes);
+  await app.register(ridersRoutes);
 
   // 6. Conectar PostgreSQL, Redis y ejecutar seed inicial
   await connectDatabase();
