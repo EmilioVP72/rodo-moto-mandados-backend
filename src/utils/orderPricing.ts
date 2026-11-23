@@ -67,6 +67,7 @@ function linePrice(line: Item, products: Map<string, Product>) {
 const coupons: Record<string, number> = { RODO10: 10, RODO15: 15, RODO20: 20, SMA15: 15, ENVIOGRATIS: 100, ENVIO50: 50 };
 export function priceFoodOrder(input: { items: Item[]; promoCode?: string; tipAmount?: number }, catalog: {
   menu: Product[]; suggestedExtras?: Product[]; deliveryFee: number; commissionRate: number; promoPercent: number;
+  personalCoupon?: { code: string; discount: number };
 }) {
   if (!Array.isArray(input.items) || !input.items.length) throw new PriceError('El pedido debe incluir productos.');
   const products = new Map([...catalog.menu, ...(catalog.suggestedExtras ?? defaultExtras)].map(p => [p.id, p]));
@@ -75,9 +76,10 @@ export function priceFoodOrder(input: { items: Item[]; promoCode?: string; tipAm
   const markup = items.reduce((n,i) => n + ((i.surcharge ?? 0) > 0 ? i.surcharge! : Math.round(i.price * 0.15)) * i.quantity, 0);
   const promotion = money(Math.round(markup * catalog.promoPercent / 100));
   const code = String(input.promoCode || '').trim().toUpperCase();
-  if (code && !Object.hasOwn(coupons, code)) throw new PriceError('Cupón no válido.');
+  const personal = code && catalog.personalCoupon?.code === code ? catalog.personalCoupon : undefined;
+  if (code && !personal && !Object.hasOwn(coupons, code)) throw new PriceError('Cupón no válido.');
   const shippingCoupon = code === 'ENVIOGRATIS' || code === 'ENVIO50';
-  const discount = Math.round((shippingCoupon ? catalog.deliveryFee : subtotal) * (coupons[code] || 0) / 100);
+  const discount = personal ? Math.min(money(personal.discount), Math.max(0, subtotal - promotion)) : Math.round((shippingCoupon ? catalog.deliveryFee : subtotal) * (coupons[code] || 0) / 100);
   const deliveryFee = money(catalog.deliveryFee - (shippingCoupon ? discount : 0));
   const tipAmount = money(input.tipAmount ?? 0);
   const total = money(Math.max(0, subtotal - promotion - (shippingCoupon ? 0 : discount)) + deliveryFee + tipAmount);

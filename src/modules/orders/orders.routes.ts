@@ -381,6 +381,8 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     let subtotal = 0, deliveryFee = 0, total = 0, commissionAmount = 0;
     let tipAmount = 0, promoDiscountApplied = 0;
     const quoted = ['pedido_personalizado', 'local_no_encontrado', 'auxilio_gasolina'].includes(kind);
+    const personalCoupon = isStandardFoodOrder ? customerUser.coupons.find(coupon =>
+      !coupon.used && coupon.code === String(body.promoCode || '').trim().toUpperCase()) : undefined;
     body.isCustomQuote = quoted;
     delete body.quoteOfferedAt;
     body.quoteConfirmedByCustomer = false;
@@ -390,7 +392,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
         const surcharge = body.deliveryType === 'express' ? money(settings.expressDeliverySurcharge ?? 25) : 0;
         const price = priceFoodOrder(body, { menu: menu.menu || [], suggestedExtras: menu.suggestedExtras,
           deliveryFee: restaurantDoc.deliveryFee + surcharge, commissionRate: restaurantDoc.commissionRate,
-          promoPercent: menu.promoActive ? menu.promoDiscountPercent || 0 : 0 });
+          personalCoupon, promoPercent: menu.promoActive ? menu.promoDiscountPercent || 0 : 0 });
         ({ items, subtotal, total, deliveryFee, commissionAmount, tipAmount, promoDiscountApplied } = price);
         body.restaurantCommissionRate = restaurantDoc.commissionRate;
         body.deliveryTypeSurcharge = surcharge;
@@ -486,6 +488,13 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
 
     // 4.6 Transacción relacional atómica en PostgreSQL
     const saved = await prisma.$transaction(async (tx) => {
+      if (personalCoupon) {
+        const claim = await tx.coupon.updateMany({
+          where: { id: personalCoupon.id, userId: customerUser.id, used: false },
+          data: { used: true, usedAt: new Date(), usedOrderFolio: String(body.folio) },
+        });
+        if (!claim.count) return null;
+      }
       const createdOrder = await tx.order.create({
         data: {
           id: orderId,
@@ -540,26 +549,10 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
         },
       });
 
-      // Consumir cupón personal del usuario en la tabla relacional coupons si fue aplicado
-      if (body.promoCode) {
-        const codeUpper = String(body.promoCode).trim().toUpperCase();
-        await tx.coupon.updateMany({
-          where: {
-            userId: customerUser.id,
-            code: codeUpper,
-            used: false,
-          },
-          data: {
-            used: true,
-            usedAt: new Date(),
-            usedOrderFolio: createdOrder.folio,
-          },
-        });
-      }
-
       return createdOrder;
     });
 
+    if (!saved) return reply.code(409).send({ error: 'El cupón ya fue utilizado. Revisa el total del pedido.' });
     const mapped = mapOrderRowToPayload(saved);
     emitOrderEvent('orders:created', mapped);
     emitOrderEvent('orders:updated', mapped);
