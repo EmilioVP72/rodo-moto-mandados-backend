@@ -32,6 +32,7 @@ model User {
   ine10DigitsHash      String?       @unique
   inePhotoUploaded     Boolean       @default(false)
   ineVerifiedAt        DateTime?
+  ineReviewedBy        String?
   pendingDebt          Float         @default(0)
   debtReason           String?
   debtOrderFolio       String?

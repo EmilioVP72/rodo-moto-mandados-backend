@@ -54,11 +54,11 @@ function serializeUserAccount(user: any) {
     phone: user.phone,
     email: user.email,
     role: user.role,
-    ineVerified: user.ineVerified,
+    ineVerified: Boolean(user.ineReviewedBy && user.ineVerified),
     ineDigits: maskedIne,
     ine10Digits: maskedIne,
     inePhotoUploaded: user.inePhotoUploaded,
-    ineVerifiedAt:
+    ineVerifiedAt: !user.ineReviewedBy ? undefined :
       user.ineVerifiedAt instanceof Date
         ? user.ineVerifiedAt.toISOString()
         : user.ineVerifiedAt || undefined,
@@ -185,11 +185,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           email: cleanEmail,
           passwordHash,
           role: 'CUSTOMER',
-          ineVerified: true,
+          ineVerified: false,
           ine10Digits: preparedIne.encrypted,
           ine10DigitsHash: preparedIne.hash,
-          inePhotoUploaded: true,
-          ineVerifiedAt: new Date(),
+          inePhotoUploaded: false,
+          ineVerifiedAt: null,
           pendingDebt: 0,
           status: 'activo',
           completedOrdersCount: 0,
@@ -833,6 +833,19 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(users.map(serializeUserAccount));
   });
 
+  app.post('/api/auth/accounts/:id/identity-review', { preHandler: [requireAdmin] }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = z.object({ digits: z.string().regex(/^\d{10}$/), checkedOriginal: z.literal(true) }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Confirma la revisión del documento original y captura sus diez dígitos.' });
+    const identity = prepareIneForStorage(parsed.data.digits)!;
+    const result = await prisma.user.updateMany({
+      where: { id, role: 'CUSTOMER', ine10DigitsHash: identity.hash },
+      data: { ineReviewedBy: request.authUser!.sub, ineVerified: true, ineVerifiedAt: new Date() },
+    });
+    if (!result.count) return reply.code(409).send({ error: 'El documento presentado no coincide con el registro.' });
+    return reply.send({ ok: true });
+  });
+
   app.post('/api/auth/accounts', { preHandler: [requireAdmin] }, async (request, reply) => {
     const body = request.body as any;
     if (!body || !body.email) {
@@ -852,14 +865,17 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       update: {
         name: body.name || 'Cliente RODO',
         phone: body.phone || '',
-        ineVerified: Boolean(body.ineVerified ?? true),
+        
         ...(preparedAdminIne
           ? {
+              ineReviewedBy: null,
+              ineVerified: false,
+              ineVerifiedAt: null,
               ine10Digits: preparedAdminIne.encrypted,
               ine10DigitsHash: preparedAdminIne.hash,
             }
           : {}),
-        inePhotoUploaded: Boolean(body.inePhotoUploaded ?? true),
+        inePhotoUploaded: Boolean(body.inePhotoUploaded ?? false),
         pendingDebt: Number(body.pendingDebt ?? 0),
         debtReason: body.debtReason || null,
         debtOrderFolio: body.debtOrderFolio || null,
@@ -879,10 +895,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         email: cleanEmail,
         passwordHash: defaultHash,
         role: 'CUSTOMER',
-        ineVerified: Boolean(body.ineVerified ?? true),
+        ineVerified: false,
         ine10Digits: preparedAdminIne?.encrypted || null,
         ine10DigitsHash: preparedAdminIne?.hash || null,
-        inePhotoUploaded: Boolean(body.inePhotoUploaded ?? true),
+        inePhotoUploaded: Boolean(body.inePhotoUploaded ?? false),
         pendingDebt: Number(body.pendingDebt ?? 0),
         debtReason: body.debtReason || null,
         debtOrderFolio: body.debtOrderFolio || null,
