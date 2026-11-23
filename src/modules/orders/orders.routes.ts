@@ -1,5 +1,6 @@
 import { dailyReceipts } from '../../utils/dailyReceipts.js';
-import { FastifyInstance } from 'fastify';
+import { FastifyInstance, type RouteHandlerMethod } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { prisma } from '../../infra/prisma.js';
 import { emitOrderEvent, emitAdminEvent } from '../../infra/socket.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
@@ -323,9 +324,16 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
   // =========================================================================
   // 4. CREAR ORDEN TRANSACCIONAL (ORDER + ORDER_ITEMS + STATUS_HISTORY + COUPON)
   // =========================================================================
-  app.post('/api/orders', { preHandler: [requireAuth] }, async (request, reply) => {
+  const createOrder: RouteHandlerMethod = async (request, reply) => {
     const authUser = request.authUser!;
     const body = request.body as any;
+    if (request.routeOptions.url === '/api/dispatch-order') {
+      if (authUser.role !== 'CUSTOMER' && authUser.role !== 'PARTNER_LOCAL') {
+        return reply.code(403).send({ error: 'Usa la sesión de la cuenta que solicita el servicio.' });
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return reply.code(400).send({ error: 'Pedido inválido.' });
+      body.folio ??= 'RD-' + randomUUID().toUpperCase();
+    }
     if (!body || !body.folio || !body.restaurantName) {
       return reply.status(400).send({ error: 'Datos de la orden incompletos.' });
     }
@@ -557,7 +565,9 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     emitOrderEvent('orders:created', mapped);
     emitOrderEvent('orders:updated', mapped);
     return reply.status(201).send(mapped);
-  });
+  };
+  app.post('/api/orders', { preHandler: [requireAuth] }, createOrder);
+  app.post('/api/dispatch-order', { preHandler: [requireAuth] }, createOrder);
 
   // =========================================================================
   // 5. CREACIÓN EN LOTE (EXCLUSIVO ADMIN)
