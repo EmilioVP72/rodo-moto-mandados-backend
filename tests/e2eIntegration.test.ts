@@ -450,13 +450,21 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
     const code = me.data.user.coupons[0].code;
     const order = { restaurantId: 'tacos-sebas', restaurantName: 'Tacos Sebastián', items: [{id:'ts-1',quantity:1}],
       deliveryAddress: 'Calle Correo 14, Centro', promoCode: code, paymentMethod: 'efectivo' };
-    const attempts = await Promise.all(['a','b'].map(suffix => e2eFetch('/api/dispatch-order',
-      options(customerBToken, 'POST', {...order, id:'qa-coupon-' + runId + suffix}))));
+    const dispatch = () => e2eFetch('/api/dispatch-order', options(customerBToken, 'POST', order));
+    const attempts = await Promise.all([dispatch(), dispatch()]);
     const created = attempts.filter(r => r.status === 201);
     assert.equal(created.length, 1);
     assert.ok(attempts.some(r => [409,422].includes(r.status)));
     assert.equal(created[0].data.total, 100);
     assert.ok(created[0].data.folio.startsWith('RD-'));
+    const dispatchWithoutCoupon = () => e2eFetch('/api/dispatch-order',
+      options(customerBToken, 'POST', { ...order, promoCode: '' }));
+    const [first, second] = await Promise.all([dispatchWithoutCoupon(), dispatchWithoutCoupon()]);
+    assert.equal(first.status, 201);
+    assert.equal(second.status, 201);
+    assert.ok(first.data.id && second.data.id);
+    assert.notEqual(first.data.id, second.data.id);
+    assert.notEqual(first.data.folio, second.data.folio);
     const history = await e2eFetch('/api/admin/orders/history?search=' + created[0].data.folio, options(adminToken));
     assert.ok(history.data.orders.some((o: any) => o.folio === created[0].data.folio));
     assert.equal((await e2eFetch('/api/auth/me', options(customerBToken))).data.user.coupons[0].used, true);

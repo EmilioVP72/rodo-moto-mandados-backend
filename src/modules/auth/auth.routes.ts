@@ -857,7 +857,6 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       update: {
         name: body.name || 'Cliente RODO',
         phone: body.phone || '',
-        
         ...(preparedAdminIne
           ? {
               ineReviewedBy: null,

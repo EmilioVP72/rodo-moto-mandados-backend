@@ -470,7 +470,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
-    const orderId = String(body.id || `ord-${Date.now()}`);
+    const orderId = String(body.id || 'ord-' + randomUUID());
     const nowIso = new Date().toISOString();
     const initialStatus = quoted ? 'pendiente_cotizacion' : 'nuevo';
     if (cleanSpeiKey) body.bankVerification.trackingKey = cleanSpeiKey;
