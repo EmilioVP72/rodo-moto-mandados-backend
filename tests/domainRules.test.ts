@@ -176,6 +176,8 @@ describe('Transiciones autorizadas por rol', () => {
   const order = { status: 'nuevo', assignedRiderUserId: 'r1', paymentMethod: 'efectivo', paymentStatus: 'en_efectivo' };
   it('despacho asigna desde nuevo pero no puede saltar a entregado', () => {
     assert.ok(allowedOrderTransitions('ADMIN', order).includes('asignado'));
+    assert.ok(allowedOrderTransitions('ADMIN', order).includes('afuera_del_domicilio'));
+    assert.ok(allowedOrderTransitions('ADMIN', {...order, assignedRiderUserId: null, assignedRiderName: 'Moto 1'}).includes('asignado'));
     assert.ok(!allowedOrderTransitions('ADMIN', order).includes('entregado'));
     assert.ok(!allowedOrderTransitions('ADMIN', {...order, assignedRiderUserId: null}).includes('asignado'));
   });

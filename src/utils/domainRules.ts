@@ -83,10 +83,10 @@ export function canRiderTransitionOrderStatus(fromStatus: string, toStatus: stri
 
 const ADMIN_TRANSITIONS: Record<string, readonly string[]> = {
   pendiente_cotizacion: ['cancelado'],
-  nuevo: ['en_preparacion', 'asignado', 'cancelado'],
-  en_preparacion: ['asignado', 'cancelado'],
-  asignado: ['nuevo', 'recolectado', 'cancelado'],
-  recolectado: ['en_camino', 'cancelado'],
+  nuevo: ['en_preparacion', 'asignado', 'afuera_del_domicilio', 'cancelado'],
+  en_preparacion: ['asignado', 'afuera_del_domicilio', 'cancelado'],
+  asignado: ['nuevo', 'recolectado', 'afuera_del_domicilio', 'cancelado'],
+  recolectado: ['en_camino', 'afuera_del_domicilio', 'cancelado'],
   en_camino: ['afuera_del_domicilio', 'cancelado'],
   afuera_del_domicilio: ['entregado', 'cancelado', 'cancelado_con_deuda'],
   entregado: [], cancelado: [], cancelado_con_deuda: [],
@@ -95,8 +95,8 @@ const ADMIN_TRANSITIONS: Record<string, readonly string[]> = {
 export function isOrderStatus(status: string) { return Object.hasOwn(ADMIN_TRANSITIONS, status); }
 
 export function allowedOrderTransitions(role: string, order: {
-  status: string; assignedRiderUserId?: string | null; paymentMethod: string;
-  paymentStatus: string; quoteOffered?: boolean;
+  status: string; assignedRiderUserId?: string | null; assignedRiderName?: string | null;
+  paymentMethod: string; paymentStatus: string; quoteOffered?: boolean;
 }): readonly string[] {
   if (!isOrderStatus(order.status)) return [];
   if (role === 'CUSTOMER' || role === 'PARTNER_LOCAL') {
@@ -105,9 +105,13 @@ export function allowedOrderTransitions(role: string, order: {
     return order.paymentMethod === 'transferencia' && order.paymentStatus !== 'verificado' ? [] : ['entregado'];
   }
   const targets = role === 'ADMIN' ? ADMIN_TRANSITIONS[order.status] : role === 'RIDER' ? RIDER_STATUS_TRANSITIONS[order.status] || [] : [];
+  const hasAssignedRider = Boolean(order.assignedRiderUserId || order.assignedRiderName);
   return targets.filter(to => {
+    if (role === 'ADMIN' && to === 'afuera_del_domicilio') {
+      return true;
+    }
     if (['asignado','recolectado','en_camino','afuera_del_domicilio','entregado'].includes(to)) {
-      return Boolean(order.assignedRiderUserId) && (order.paymentMethod !== 'transferencia' || order.paymentStatus === 'verificado');
+      return hasAssignedRider && (order.paymentMethod !== 'transferencia' || order.paymentStatus === 'verificado');
     }
     return true;
   });

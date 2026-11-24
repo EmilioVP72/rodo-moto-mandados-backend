@@ -59,6 +59,25 @@ export async function lockAssignableRider(tx: Prisma.TransactionClient, userId: 
   return rider;
 }
 
+export async function lockDispatchRider(tx: Prisma.TransactionClient, riderId: string) {
+  const [rider] = await tx.$queryRaw<{
+    id: string;
+    userId: string | null;
+    name: string;
+    phone: string;
+  }[]>`
+    SELECT r.id, r."userId", r.name, r.phone
+    FROM riders r
+    LEFT JOIN users u ON u.id = r."userId"
+    WHERE (r.id = ${riderId} OR r."userId" = ${riderId})
+      AND r.available
+      AND r."deletedAt" IS NULL
+      AND (r."userId" IS NULL OR (u.role = 'RIDER' AND u.status = 'activo'))
+    FOR SHARE OF r`;
+  if (!rider) fail(422, 'El repartidor ya no está disponible para asignaciones.');
+  return rider;
+}
+
 export function riderDirectoryRoutes(app: FastifyInstance) {
   const path = '/api/admin/riders';
   const admin = { preHandler: [requireAdmin] };
