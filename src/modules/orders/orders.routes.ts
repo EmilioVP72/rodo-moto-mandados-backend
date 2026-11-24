@@ -1,3 +1,4 @@
+import { lockAssignableRider } from '../riders/directory.js';
 import { dailyReceipts } from '../../utils/dailyReceipts.js';
 import { FastifyInstance, type RouteHandlerMethod } from 'fastify';
 import { randomUUID } from 'node:crypto';
@@ -503,6 +504,8 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
         });
         if (!claim.count) return null;
       }
+      const rider = authUser.role === 'ADMIN' && body.assignedRiderUserId
+        ? await lockAssignableRider(tx, String(body.assignedRiderUserId)) : null;
       const createdOrder = await tx.order.create({
         data: {
           id: orderId,
@@ -524,9 +527,9 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
           speiTrackingKey: cleanSpeiKey,
           deliveryAddress: String(body.deliveryAddress || ''),
           status: initialStatus,
-          assignedRiderName: authUser.role === 'ADMIN' ? body.assignedRiderName || null : null,
-          assignedRiderPhone: authUser.role === 'ADMIN' ? body.assignedRiderPhone || null : null,
-          assignedRiderUserId: authUser.role === 'ADMIN' ? body.assignedRiderUserId || null : null,
+          assignedRiderName: rider?.name ?? (authUser.role === 'ADMIN' ? body.assignedRiderName || null : null),
+          assignedRiderPhone: rider?.phone ?? (authUser.role === 'ADMIN' ? body.assignedRiderPhone || null : null),
+          assignedRiderUserId: rider?.id ?? null,
           payload: fullPayload,
           items: {
             create: items.map((it: any) => {
@@ -656,20 +659,9 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     let assignedRiderPhone = existing.assignedRiderPhone;
     if (isAdmin && updates.assignedRiderUserId !== undefined) {
       const requestedRiderId = updates.assignedRiderUserId ? String(updates.assignedRiderUserId) : null;
-      const rider = requestedRiderId
-        ? await prisma.user.findFirst({
-            where: { id: requestedRiderId, role: 'RIDER', status: 'activo' },
-            select: { id: true, name: true, phone: true },
-          })
-        : null;
-      if (requestedRiderId && !rider) {
-        return reply.status(422).send({ error: 'La cuenta de repartidor no existe o está inactiva.' });
-      }
-      assignedRiderUserId = rider?.id || null;
-      assignedRiderName = rider?.name || null;
-      assignedRiderPhone = rider?.phone || null;
-      updates.assignedRiderName = assignedRiderName;
-      updates.assignedRiderPhone = assignedRiderPhone;
+      assignedRiderUserId = requestedRiderId;
+      assignedRiderName = null;
+      assignedRiderPhone = null;
       if (requestedRiderId && updates.status === undefined && ['nuevo','en_preparacion'].includes(existing.status)) updates.status = 'asignado';
       if (!requestedRiderId && ['recolectado','en_camino','afuera_del_domicilio'].includes(existing.status)) return reply.status(409).send({ error: 'Reasigna el pedido a otra cuenta activa.' });
       if (!requestedRiderId && existing.status === 'asignado' && updates.status === undefined) {
@@ -709,7 +701,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       updates.quoteOfferedAt = nowIso;
       if (fuel) updates.fuelDetails = { ...prevPayload.fuelDetails, serviceTravelFee: updates.deliveryFee };
     }
-    const mergedPayload = {
+    const mergedPayload: Record<string, any> = {
       ...prevPayload,
       ...updates,
       id,
@@ -735,6 +727,11 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(409).send({ error: 'Confirma la cotización antes de continuar.' });
     }
     const updated = await prisma.$transaction(async (tx) => {
+      if (isAdmin && updates.assignedRiderUserId !== undefined) {
+        const rider = assignedRiderUserId ? await lockAssignableRider(tx, assignedRiderUserId) : null;
+        mergedPayload.assignedRiderName = assignedRiderName = rider?.name ?? null;
+        mergedPayload.assignedRiderPhone = assignedRiderPhone = rider?.phone ?? null;
+      }
       const changed = await tx.order.updateMany({
         where: { id, status: existing.status, updatedAt: existing.updatedAt },
         data: {

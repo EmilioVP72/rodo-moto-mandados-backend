@@ -288,6 +288,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     const user = await prisma.user.findFirst({
       where: {
+        NOT: { role: 'RIDER', rider: { is: { deletedAt: { not: null } } } },
         OR: [
           { email: lookupEmail },
           ...(phoneDigits.length >= 8 ? [{ phone: phoneDigits }] : []),
@@ -367,13 +368,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       where: { tokenHash: incomingHash },
       include: {
         user: {
-          include: { coupons: true, addresses: true, favorites: true },
+          include: { coupons: true, addresses: true, favorites: true, rider: { select: { deletedAt: true } } },
         },
       },
     });
 
     if (
       !existingSession ||
+      existingSession.user.rider?.deletedAt ||
       existingSession.revokedAt !== null ||
       existingSession.expiresAt < new Date()
     ) {
@@ -486,7 +488,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         });
       }
     }
-    if (!user) return reply.send(recoveryReceipt);
+    if (!user || (user.role === 'RIDER' && !await prisma.rider.findFirst({
+      where: { userId: user.id, deletedAt: null }, select: { id: true },
+    }))) return reply.send(recoveryReceipt);
     const code = generateSixDigitResetCode();
     const token = await prisma.$transaction(async tx => {
       await tx.$queryRaw`SELECT id FROM users WHERE id = ${user.id} FOR UPDATE`;
@@ -517,7 +521,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const cleanEmail = parsed.data.email.toLowerCase();
-    const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
+    const user = await prisma.user.findFirst({ where: { email: cleanEmail, NOT: { role: 'RIDER', rider: { is: { deletedAt: { not: null } } } } } });
     if (!user) {
       return reply.status(400).send({ error: 'Código inválido o expirado.' });
     }

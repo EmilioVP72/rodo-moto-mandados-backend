@@ -526,4 +526,38 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
     assert.equal(reset.status,200);
     assert.equal(reset.data.user.email,email);
   });
+  it('14. Despacho administra la flotilla y conserva la asignación histórica al dar de baja', async () => {
+    const path = '/api/admin/riders';
+    const create = { name: 'Moto Directorio', phone: '4158'+runId, email: 'flotilla.'+runId+'@example.invalid', password: 'DirectorioQA123!' };
+    const rider = await e2eFetch(path, options(adminToken, 'POST', create));
+    assert.equal(rider.status, 201);
+    assert.equal(rider.data.id, rider.data.userId);
+    const url = path + '/' + rider.data.id;
+    assert.equal((await e2eFetch(url, options(customerBToken, 'DELETE'))).status, 403);
+    assert.equal((await e2eFetch(path, options(adminToken, 'POST', create))).status, 409);
+    assert.equal((await e2eFetch(url, options(adminToken, 'PATCH', { phone: 'abcdefgh' }))).status, 400);
+    const update = await e2eFetch(url, options(adminToken, 'PATCH', { name: 'Moto Actualizada' }));
+    assert.equal(update.data.name, 'Moto Actualizada');
+    assert.equal((await e2eFetch(url, options(adminToken))).data.name, 'Moto Actualizada');
+    const login = () => e2eFetch('/api/auth/login', { method: 'POST', body: JSON.stringify({email:create.email,password:create.password}) });
+    const session = await login();
+    assert.equal(session.status, 200);
+    const order = await e2eFetch('/api/dispatch-order', options(customerBToken, 'POST', { restaurantId:'tacos-sebas',
+      restaurantName:'Tacos Sebastián', items:[{id:'ts-1',quantity:1}], deliveryAddress:'Calle Correo 14', paymentMethod:'efectivo' }));
+    assert.equal(order.status, 201);
+    const orderPath = '/api/orders/' + order.data.id;
+    const assign = () => e2eFetch(orderPath, options(adminToken, 'PATCH', {assignedRiderUserId:rider.data.id}));
+    assert.equal((await e2eFetch(url, options(adminToken, 'PATCH', {available:false}))).status, 200);
+    assert.equal((await assign()).status, 422);
+    assert.equal((await e2eFetch(url, options(adminToken, 'PATCH', {available:true}))).status, 200);
+    assert.equal((await assign()).data.assignedRiderName, 'Moto Actualizada');
+    assert.equal((await e2eFetch(url, options(adminToken, 'DELETE'))).status, 409);
+    assert.equal((await e2eFetch(orderPath, options(adminToken, 'PATCH', {status:'cancelado'}))).status, 200);
+    assert.equal((await e2eFetch(url, options(adminToken, 'DELETE'))).status, 204);
+    assert.equal((await e2eFetch(path, options(adminToken))).data.some((r: any) => r.id === rider.data.id), false);
+    assert.equal((await e2eFetch('/api/rider/orders', options(session.data.token))).status, 401);
+    assert.equal((await login()).status, 401);
+    assert.equal((await e2eFetch(url, options(adminToken))).status, 404);
+    assert.equal((await e2eFetch(orderPath, options(adminToken))).data.assignedRiderUserId, rider.data.id);
+  });
 });

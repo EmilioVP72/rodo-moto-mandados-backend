@@ -7,9 +7,9 @@ import { requireAdmin, extractUserFromRequest } from '../../middlewares/auth.js'
 const SETTINGS_CACHE_KEY = 'rodo:settings:general';
 
 function sanitizeSettingsForPublic(payload: Record<string, unknown>, isAdmin: boolean) {
-  if (isAdmin) return payload;
   const copy = { ...payload };
-  delete copy.adminPasscode;
+  delete copy.ridersList;
+  if (!isAdmin) delete copy.adminPasscode;
   return copy;
 }
 
@@ -35,6 +35,7 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'Configuración inválida.' });
     }
 
+    delete body.ridersList;
     const existing = await prisma.setting.findUnique({ where: { id: 'general' } });
     const merged = {
       ...((existing?.payload as Record<string, unknown>) || {}),
@@ -50,6 +51,6 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     await invalidateCache(SETTINGS_CACHE_KEY);
     // Nunca emitir adminPasscode por Socket.IO público
     broadcastEvent('settings:updated', sanitizeSettingsForPublic(merged, false));
-    return reply.send(merged);
+    return reply.send(sanitizeSettingsForPublic(merged, true));
   });
 }

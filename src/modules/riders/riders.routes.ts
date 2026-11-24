@@ -1,64 +1,14 @@
-import bcrypt from 'bcryptjs';
+import { riderDirectoryRoutes } from './directory.js';
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireAdmin, requireRider } from '../../middlewares/auth.js';
+import { requireRider } from '../../middlewares/auth.js';
 import { prisma } from '../../infra/prisma.js';
-import { emitOrderEvent, emitAdminEvent } from '../../infra/socket.js';
+import { emitOrderEvent } from '../../infra/socket.js';
 import { allowedOrderTransitions } from '../../utils/domainRules.js';
 import { mapOrderRowToPayload } from '../orders/orders.routes.js';
 
-const riderPasswordRounds = 12;
-
 export async function ridersRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/admin/riders', { preHandler: [requireAdmin] }, async (_request, reply) => {
-    const riders = await prisma.user.findMany({
-      where: { role: 'RIDER' },
-      select: { id: true, name: true, email: true, phone: true, status: true, createdAt: true },
-      orderBy: { createdAt: 'asc' },
-    });
-    return reply.send(riders);
-  });
-
-  app.post('/api/admin/riders', { preHandler: [requireAdmin] }, async (request, reply) => {
-    const schema = z.object({
-      name: z.string().trim().min(2, 'El nombre del repartidor debe tener al menos 2 caracteres.').max(120),
-      email: z.string().trim().email('Ingresa un correo electrónico válido.').max(254),
-      phone: z.string().trim().min(8, 'El teléfono debe tener al menos 8 dígitos.').max(32),
-      password: z.string().min(8, 'La contraseña debe tener al menos 8 caracteres.').max(128),
-    });
-    const parsed = schema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.issues[0]?.message || 'Datos de repartidor inválidos.' });
-    }
-
-    const email = parsed.data.email.toLowerCase();
-    const phone = parsed.data.phone.trim();
-    const duplicate = await prisma.user.findFirst({
-      where: { OR: [{ email }, { phone }] },
-      select: { id: true, email: true, phone: true },
-    });
-    if (duplicate) {
-      const reason =
-        duplicate.email === email
-          ? 'Ese correo electrónico ya está vinculado a otra cuenta.'
-          : 'Ese número de teléfono ya está vinculado a otra cuenta.';
-      return reply.status(409).send({ error: reason });
-    }
-
-    const rider = await prisma.user.create({
-      data: {
-        name: parsed.data.name,
-        email,
-        phone,
-        passwordHash: await bcrypt.hash(parsed.data.password, riderPasswordRounds),
-        role: 'RIDER',
-        status: 'activo',
-      },
-      select: { id: true, name: true, email: true, phone: true, status: true, createdAt: true },
-    });
-    emitAdminEvent('riders:updated', rider);
-    return reply.status(201).send(rider);
-  });
+  riderDirectoryRoutes(app);
 
   app.get('/api/rider/orders', { preHandler: [requireRider] }, async (request, reply) => {
     const orders = await prisma.order.findMany({

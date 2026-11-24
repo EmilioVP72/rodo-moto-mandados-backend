@@ -56,12 +56,26 @@ model User {
   orders           Order[]
   recoveryRequests AccountRecoveryRequest[]
   auditLogs        AuditLog[]
+  rider            Rider?
   assignedOrders   Order[]       @relation("AssignedRiderOrders")
 
   @@index([phone])
   @@index([role])
   @@index([status])
   @@map("users")
+}
+
+model Rider {
+  id        String    @id @default(cuid())
+  userId    String?   @unique
+  name      String
+  phone     String
+  available Boolean   @default(true)
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  user      User?     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@map("riders")
 }
 
 // 2. SESIONES ACTIVAS (REFRESH TOKENS HASHEADOS CON REVOCACIÓN POR DISPOSITIVO)

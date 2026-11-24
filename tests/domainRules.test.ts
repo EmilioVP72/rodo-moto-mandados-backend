@@ -1,3 +1,4 @@
+import { riderRegistration, riderChanges } from '../src/modules/riders/validation.ts';
 import { parseImage, mayAccessOrderEvidence, isOrderFolder } from '../src/utils/evidence.ts';
 import { priceFoodOrder, priceFuelRequest, matchesDisplayedQuote, initialOrderPayment } from '../src/utils/orderPricing.ts';
 import { describe, it } from 'node:test';
@@ -214,4 +215,15 @@ it('acepta solo el importe y la versión de la cotización que vio el cliente', 
   assert.ok(!matchesDisplayedQuote(89, 'v2', 49, 'v1'));
   assert.ok(!matchesDisplayedQuote(89, 'v2', 89, 'v1'));
   assert.ok(matchesDisplayedQuote(89, undefined, 89, undefined));
+});
+
+it('valida altas y permite editar disponibilidad sin cambiar la contraseña del repartidor', () => {
+  const input = { name: '  Moto Centro  ', phone: '+52 415 111 2233', email: '  MOTO@example.invalid ', password: 'Registro123' };
+  const parsed = riderRegistration.parse(input);
+  assert.equal(parsed.name, 'Moto Centro');
+  assert.equal(parsed.email, 'moto@example.invalid');
+  assert.equal(riderRegistration.safeParse({ ...input, phone: 'teléfono' }).success, false);
+  assert.deepEqual(riderChanges.parse({ available: false }), { available: false });
+  assert.equal(riderChanges.safeParse({}).success, false);
+  assert.equal(riderChanges.safeParse({ role: 'ADMIN' }).success, false);
 });

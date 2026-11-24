@@ -109,6 +109,12 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply):
     return;
   }
 
+  if (user.role === 'RIDER' && !await prisma.rider.findFirst({
+    where: { userId: user.sub, deletedAt: null }, select: { id: true },
+  })) {
+    reply.code(401).send({ error: 'Esta cuenta de repartidor fue dada de baja.' });
+    return;
+  }
   if (user.sid) {
     const session = await prisma.refreshSession.findUnique({
       where: { id: user.sid },
