@@ -1,4 +1,4 @@
-import { lockAssignableRider } from '../riders/directory.js';
+import { lockAssignableRider, lockDispatchRider } from '../riders/directory.js';
 import { dailyReceipts } from '../../utils/dailyReceipts.js';
 import { FastifyInstance, type RouteHandlerMethod } from 'fastify';
 import { randomUUID } from 'node:crypto';
@@ -657,7 +657,47 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     let assignedRiderUserId = existing.assignedRiderUserId;
     let assignedRiderName = existing.assignedRiderName;
     let assignedRiderPhone = existing.assignedRiderPhone;
-    if (isAdmin && updates.assignedRiderUserId !== undefined) {
+    const isAssigningByDirectoryId = isAdmin && updates.assignedRiderId !== undefined;
+    const isAssigningByUserId = isAdmin && updates.assignedRiderUserId !== undefined;
+    const requestedDirectoryRiderId = isAssigningByDirectoryId
+      ? (updates.assignedRiderId ? String(updates.assignedRiderId) : null)
+      : null;
+
+    if (isAssigningByDirectoryId) {
+      if (requestedDirectoryRiderId) {
+        const previewRider = await prisma.rider.findFirst({
+          where: {
+            OR: [{ id: requestedDirectoryRiderId }, { userId: requestedDirectoryRiderId }],
+            available: true,
+            deletedAt: null,
+          },
+          include: { user: { select: { status: true, role: true } } },
+        });
+        if (!previewRider || (previewRider.userId && (previewRider.user?.status !== 'activo' || previewRider.user?.role !== 'RIDER'))) {
+          return reply.status(422).send({ error: 'El repartidor ya no está disponible para asignaciones.' });
+        }
+        assignedRiderUserId = previewRider.userId;
+        assignedRiderName = previewRider.name;
+        assignedRiderPhone = previewRider.phone;
+        if (
+          updates.status === undefined &&
+          ['nuevo', 'en_preparacion'].includes(existing.status) &&
+          (existing.paymentMethod !== 'transferencia' || existing.paymentStatus === 'verificado')
+        ) {
+          updates.status = 'asignado';
+        }
+      } else {
+        assignedRiderUserId = null;
+        assignedRiderName = null;
+        assignedRiderPhone = null;
+        if (['recolectado', 'en_camino', 'afuera_del_domicilio'].includes(existing.status)) {
+          return reply.status(409).send({ error: 'Reasigna el pedido a otra cuenta activa.' });
+        }
+        if (existing.status === 'asignado' && updates.status === undefined) {
+          updates.status = 'nuevo';
+        }
+      }
+    } else if (isAssigningByUserId) {
       const requestedRiderId = updates.assignedRiderUserId ? String(updates.assignedRiderUserId) : null;
       assignedRiderUserId = requestedRiderId;
       assignedRiderName = null;
@@ -669,8 +709,8 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
-    if (isAdmin && updates.status === 'asignado' && !assignedRiderUserId) {
-      return reply.status(422).send({ error: 'Asigna una cuenta activa de repartidor antes de marcar el pedido como asignado.' });
+    if (isAdmin && updates.status === 'asignado' && !assignedRiderUserId && !assignedRiderName) {
+      return reply.status(422).send({ error: 'Asigna un repartidor disponible antes de marcar el pedido como asignado.' });
     }
 
     const now = new Date();
@@ -711,7 +751,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     const nextStatus = updates.status !== undefined ? String(updates.status) : existing.status;
 
     const quoteOffered = Boolean(prevPayload.quoteOfferedAt || (existing.orderType !== 'auxilio_gasolina' && existing.subtotal > 0));
-    const allowed = allowedOrderTransitions(authUser.role, { ...existing, assignedRiderUserId, quoteOffered });
+    const allowed = allowedOrderTransitions(authUser.role, { ...existing, assignedRiderUserId, assignedRiderName, quoteOffered });
     if (nextStatus !== existing.status && !allowed.includes(nextStatus)) {
       return reply.status(409).send({ error: 'El cambio de estado no está permitido para este pedido y rol.' });
     }
@@ -727,7 +767,13 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(409).send({ error: 'Confirma la cotización antes de continuar.' });
     }
     const updated = await prisma.$transaction(async (tx) => {
-      if (isAdmin && updates.assignedRiderUserId !== undefined) {
+      if (isAssigningByDirectoryId) {
+        const rider = requestedDirectoryRiderId ? await lockDispatchRider(tx, requestedDirectoryRiderId) : null;
+        mergedPayload.assignedRiderId = rider?.id ?? null;
+        mergedPayload.assignedRiderUserId = assignedRiderUserId = rider?.userId ?? null;
+        mergedPayload.assignedRiderName = assignedRiderName = rider?.name ?? null;
+        mergedPayload.assignedRiderPhone = assignedRiderPhone = rider?.phone ?? null;
+      } else if (isAssigningByUserId) {
         const rider = assignedRiderUserId ? await lockAssignableRider(tx, assignedRiderUserId) : null;
         mergedPayload.assignedRiderName = assignedRiderName = rider?.name ?? null;
         mergedPayload.assignedRiderPhone = assignedRiderPhone = rider?.phone ?? null;
@@ -748,15 +794,15 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
               : existing.deliveryFee,
           total: isAdmin && updates.total !== undefined ? Number(updates.total) : existing.total,
           assignedRiderName:
-            isAdmin && (updates.assignedRiderUserId !== undefined || updates.assignedRiderName !== undefined)
+            isAdmin && (isAssigningByDirectoryId || isAssigningByUserId || updates.assignedRiderName !== undefined)
               ? assignedRiderName
               : existing.assignedRiderName,
           assignedRiderPhone:
-            isAdmin && (updates.assignedRiderUserId !== undefined || updates.assignedRiderPhone !== undefined)
+            isAdmin && (isAssigningByDirectoryId || isAssigningByUserId || updates.assignedRiderPhone !== undefined)
               ? assignedRiderPhone
               : existing.assignedRiderPhone,
           assignedRiderUserId:
-            isAdmin && updates.assignedRiderUserId !== undefined
+            isAdmin && (isAssigningByDirectoryId || isAssigningByUserId)
               ? assignedRiderUserId
               : existing.assignedRiderUserId,
           payload: mergedPayload,
@@ -818,6 +864,95 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
 
     const mapped = mapOrderRowToPayload(updated);
     emitOrderEvent('orders:updated', mapped);
+    if (nextStatus === 'afuera_del_domicilio' || updates.customerNotifiedOutside === true) {
+      emitOrderEvent('order:arrival-alert', {
+        id: mapped.id,
+        folio: mapped.folio,
+        customerId: mapped.customerId,
+        assignedRiderUserId: mapped.assignedRiderUserId,
+        assignedRiderName: mapped.assignedRiderName || 'Repartidor RODO',
+        deliveryAddress: mapped.deliveryAddress,
+        arrivalNotifiedAt: (mapped as any).arrivalNotifiedAt || nowIso,
+        arrivalExpiresAt: (mapped as any).arrivalExpiresAt || new Date(now.getTime() + 10 * 60 * 1000).toISOString(),
+      });
+    }
+    return reply.send(mapped);
+  });
+
+  // =========================================================================
+  // 7. AVISAR AL CLIENTE QUE EL REPARTIDOR ESTÁ AFUERA (10 MIN DE TOLERANCIA)
+  // =========================================================================
+  app.post('/api/orders/:id/notify-arrival', { preHandler: [requireAuth] }, async (request, reply) => {
+    const authUser = request.authUser!;
+    const { id } = request.params as { id: string };
+
+    const existing = await prisma.order.findUnique({ where: { id } });
+    if (!existing) {
+      return reply.status(404).send({ error: 'Orden no encontrada.' });
+    }
+
+    const isAdmin = authUser.role === 'ADMIN';
+    const isAssignedRider = authUser.role === 'RIDER' && existing.assignedRiderUserId === authUser.sub;
+    if (!isAdmin && !isAssignedRider) {
+      return reply.status(403).send({ error: 'Solo despacho o el repartidor asignado puede enviar el aviso de llegada.' });
+    }
+
+    if (['entregado', 'cancelado', 'cancelado_con_deuda'].includes(existing.status)) {
+      return reply.status(409).send({ error: 'Este pedido ya fue cerrado y no admite aviso de llegada.' });
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const expiresIso = new Date(now.getTime() + 10 * 60 * 1000).toISOString();
+    const prevPayload = (existing.payload || {}) as Record<string, any>;
+    const mergedPayload = {
+      ...prevPayload,
+      status: 'afuera_del_domicilio',
+      arrivalNotifiedAt: nowIso,
+      arrivalExpiresAt: expiresIso,
+      customerNotifiedOutside: true,
+      updatedAt: nowIso,
+    };
+
+    const updated = await prisma.$transaction(async (tx) => {
+      await tx.order.update({
+        where: { id },
+        data: {
+          status: 'afuera_del_domicilio',
+          payload: mergedPayload,
+        },
+      });
+      if (existing.status !== 'afuera_del_domicilio') {
+        await tx.orderStatusHistory.create({
+          data: {
+            orderId: id,
+            fromStatus: existing.status,
+            toStatus: 'afuera_del_domicilio',
+            changedByUserId: authUser.sub,
+            changedByRole: authUser.role,
+            note: 'Aviso de llegada al domicilio enviado al cliente (10 min de tolerancia)',
+          },
+        });
+      }
+      return tx.order.findUniqueOrThrow({
+        where: { id },
+        include: { items: true, statusHistory: { orderBy: { createdAt: 'desc' }, take: 10 } },
+      });
+    });
+
+    const mapped = mapOrderRowToPayload(updated);
+    emitOrderEvent('orders:updated', mapped);
+    emitOrderEvent('order:arrival-alert', {
+      id: mapped.id,
+      folio: mapped.folio,
+      customerId: mapped.customerId,
+      assignedRiderUserId: mapped.assignedRiderUserId,
+      assignedRiderName: mapped.assignedRiderName || 'Repartidor RODO',
+      deliveryAddress: mapped.deliveryAddress,
+      arrivalNotifiedAt: nowIso,
+      arrivalExpiresAt: expiresIso,
+    });
+
     return reply.send(mapped);
   });
 }

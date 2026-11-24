@@ -93,6 +93,18 @@ export async function ridersRoutes(app: FastifyInstance): Promise<void> {
 
     const mapped = mapOrderRowToPayload(updated);
     emitOrderEvent('orders:updated', mapped);
+    if (parsed.data.status === 'afuera_del_domicilio') {
+      emitOrderEvent('order:arrival-alert', {
+        id: mapped.id,
+        folio: mapped.folio,
+        customerId: mapped.customerId,
+        assignedRiderUserId: mapped.assignedRiderUserId,
+        assignedRiderName: mapped.assignedRiderName || 'Repartidor RODO',
+        deliveryAddress: mapped.deliveryAddress,
+        arrivalNotifiedAt: now.toISOString(),
+        arrivalExpiresAt: new Date(now.getTime() + 600000).toISOString(),
+      });
+    }
     const { customerEmail: _customerEmail, ...riderOrder } = mapped;
     return reply.send(riderOrder);
   });

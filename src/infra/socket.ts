@@ -135,7 +135,10 @@ export function broadcastEvent(event: string, data: unknown): void {
 /**
  * Emisión aislada por privacidad: solo el cliente propietario de la orden y los administradores reciben el evento.
  */
-export function emitOrderEvent(event: string, order: { id: string; customerId: string; assignedRiderUserId?: string | null }): void {
+export function emitOrderEvent(
+  event: string,
+  order: { id: string; customerId: string; assignedRiderUserId?: string | null; [key: string]: unknown }
+): void {
   if (!io || !order?.customerId) return;
   io.to('room:admin')
     .to(`room:customer:${order.customerId}`)
