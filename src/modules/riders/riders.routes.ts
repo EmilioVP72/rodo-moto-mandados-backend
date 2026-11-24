@@ -3,7 +3,7 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireRider } from '../../middlewares/auth.js';
 import { prisma } from '../../infra/prisma.js';
-import { emitOrderEvent } from '../../infra/socket.js';
+import { emitOrderEvent, emitAdminEvent } from '../../infra/socket.js';
 import { allowedOrderTransitions } from '../../utils/domainRules.js';
 import { mapOrderRowToPayload } from '../orders/orders.routes.js';
 
@@ -93,6 +93,17 @@ export async function ridersRoutes(app: FastifyInstance): Promise<void> {
 
     const mapped = mapOrderRowToPayload(updated);
     emitOrderEvent('orders:updated', mapped);
+    if (parsed.data.status === 'entregado' && existing.status !== 'entregado') {
+      emitAdminEvent('admin:order-delivered', {
+        id: mapped.id,
+        folio: mapped.folio,
+        customerName: mapped.customerName,
+        restaurantName: mapped.restaurantName,
+        assignedRiderName: mapped.assignedRiderName,
+        total: mapped.total,
+        deliveredAt: now.toISOString(),
+      });
+    }
     if (parsed.data.status === 'afuera_del_domicilio') {
       emitOrderEvent('order:arrival-alert', {
         id: mapped.id,

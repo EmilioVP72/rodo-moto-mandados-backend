@@ -567,6 +567,14 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     const mapped = mapOrderRowToPayload(saved);
     emitOrderEvent('orders:created', mapped);
     emitOrderEvent('orders:updated', mapped);
+    emitAdminEvent('admin:order-requested', {
+      id: mapped.id,
+      folio: mapped.folio,
+      customerName: mapped.customerName,
+      restaurantName: mapped.restaurantName,
+      total: mapped.total,
+      createdAt: mapped.createdAt,
+    });
     return reply.status(201).send(mapped);
   };
   app.post('/api/orders', { preHandler: [requireAuth] }, createOrder);
@@ -864,6 +872,17 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
 
     const mapped = mapOrderRowToPayload(updated);
     emitOrderEvent('orders:updated', mapped);
+    if (nextStatus === 'entregado' && existing.status !== 'entregado') {
+      emitAdminEvent('admin:order-delivered', {
+        id: mapped.id,
+        folio: mapped.folio,
+        customerName: mapped.customerName,
+        restaurantName: mapped.restaurantName,
+        assignedRiderName: mapped.assignedRiderName,
+        total: mapped.total,
+        deliveredAt: nowIso,
+      });
+    }
     if (nextStatus === 'afuera_del_domicilio' || updates.customerNotifiedOutside === true) {
       emitOrderEvent('order:arrival-alert', {
         id: mapped.id,
