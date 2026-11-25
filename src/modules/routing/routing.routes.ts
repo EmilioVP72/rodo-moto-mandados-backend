@@ -10,6 +10,155 @@ const EXPRESS_SURCHARGE_MXN = 25;
 // Bounding box de San Miguel de Allende, Guanajuato (oeste, norte, este, sur)
 const SMA_NOMINATIM_VIEWBOX = '-100.92,21.05,-100.55,20.76';
 
+export interface SmaAddressSearchResult {
+  id: string;
+  label: string;
+  subtitle: string;
+  street: string;
+  streetNumber: string;
+  neighborhood: string;
+  lat: number;
+  lng: number;
+}
+
+function formatNominatimSuggestion(item: any, idx: number): SmaAddressSearchResult | null {
+  const lat = Number(item?.lat);
+  const lng = Number(item?.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+  const addr = item?.address || {};
+  const rawStreet =
+    addr.road ||
+    addr.pedestrian ||
+    addr.street ||
+    addr.path ||
+    addr.footway ||
+    addr.residential ||
+    '';
+  const streetNumber = addr.house_number ? `#${String(addr.house_number).replace(/^#/, '')}` : '';
+  const neighborhood =
+    addr.neighbourhood ||
+    addr.suburb ||
+    addr.quarter ||
+    addr.village ||
+    addr.hamlet ||
+    '';
+  const placeName = item?.name && item.name !== rawStreet ? String(item.name).trim() : '';
+
+  const primaryParts: string[] = [];
+  if (placeName && !rawStreet) {
+    primaryParts.push(placeName);
+  } else if (placeName && rawStreet && !rawStreet.toLowerCase().includes(placeName.toLowerCase())) {
+    primaryParts.push(placeName);
+    primaryParts.push(`${rawStreet}${streetNumber ? ` ${streetNumber}` : ''}`);
+  } else if (rawStreet) {
+    primaryParts.push(`${rawStreet}${streetNumber ? ` ${streetNumber}` : ''}`);
+  } else if (neighborhood) {
+    primaryParts.push(neighborhood);
+  } else if (typeof item?.display_name === 'string') {
+    primaryParts.push(item.display_name.split(',')[0]?.trim() || 'San Miguel de Allende');
+  }
+
+  const label = primaryParts.filter(Boolean).join(' · ') || 'San Miguel de Allende';
+  const subtitleParts = [
+    neighborhood && !label.toLowerCase().includes(neighborhood.toLowerCase()) ? neighborhood : '',
+    addr.city || addr.town || 'San Miguel de Allende',
+  ].filter(Boolean);
+
+  return {
+    id: String(item?.place_id || `osm-${idx}-${lat.toFixed(5)}-${lng.toFixed(5)}`),
+    label,
+    subtitle: subtitleParts.join(', '),
+    street: rawStreet || placeName,
+    streetNumber,
+    neighborhood,
+    lat: Number(lat.toFixed(6)),
+    lng: Number(lng.toFixed(6)),
+  };
+}
+
+async function searchAddressesInSma(rawQuery: string, limit: number = 6): Promise<SmaAddressSearchResult[]> {
+  const cleaned = rawQuery.trim();
+  if (cleaned.length < 2) return [];
+
+  const safeLimit = Math.min(Math.max(limit, 1), 8);
+  const normalizedKey = cleaned.toLowerCase().replace(/\s+/g, ' ');
+  const cacheKey = `rodo:geo:search:${safeLimit}:${normalizedKey}`;
+  const cached = await getCache<SmaAddressSearchResult[]>(cacheKey);
+  if (Array.isArray(cached) && cached.length > 0) {
+    return cached;
+  }
+
+  const withoutHouseNumber = cleaned.replace(/(?:#|no\.?\s*|núm\.?\s*)?\b\d+[a-zA-Z]?(?:-\w+)?\b/gi, '').replace(/\s+/g, ' ').trim();
+  const hasSmaSuffix = /san\s+miguel/i.test(cleaned);
+
+  const attemptUrls: string[] = [
+    `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=${safeLimit}&countrycodes=mx&viewbox=${SMA_NOMINATIM_VIEWBOX}&bounded=1&q=${encodeURIComponent(
+      hasSmaSuffix ? cleaned : `${cleaned}, San Miguel de Allende, Guanajuato, Mexico`
+    )}`,
+  ];
+
+  // Si incluye número exterior que OSM no tiene registrado, reintentar sin el número para ubicar la calle
+  if (withoutHouseNumber.length >= 3 && withoutHouseNumber.toLowerCase() !== cleaned.toLowerCase()) {
+    attemptUrls.push(
+      `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=${safeLimit}&countrycodes=mx&viewbox=${SMA_NOMINATIM_VIEWBOX}&bounded=1&q=${encodeURIComponent(
+        `${withoutHouseNumber}, San Miguel de Allende, Guanajuato, Mexico`
+      )}`
+    );
+  }
+
+  // Fallback por colonia/zona si contiene coma
+  if (cleaned.includes(',')) {
+    const tail = cleaned.split(',').slice(1).join(',').trim();
+    if (tail.length >= 3) {
+      attemptUrls.push(
+        `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=${safeLimit}&countrycodes=mx&viewbox=${SMA_NOMINATIM_VIEWBOX}&bounded=1&q=${encodeURIComponent(
+          `${tail}, San Miguel de Allende, Guanajuato, Mexico`
+        )}`
+      );
+    }
+  }
+
+  const collected: SmaAddressSearchResult[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const url of attemptUrls) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'Accept-Language': 'es-MX,es;q=0.9',
+          'User-Agent': 'RODO-MotoMandados-SMA-Server/1.0 (soporte@rodomotomandados.com)',
+        },
+      });
+      if (!response.ok) continue;
+      const results = (await response.json()) as any[];
+      if (!Array.isArray(results)) continue;
+
+      for (let i = 0; i < results.length; i++) {
+        const formatted = formatNominatimSuggestion(results[i], i);
+        if (!formatted) continue;
+        const dedupeKey = `${formatted.label.toLowerCase()}|${formatted.lat.toFixed(4)}|${formatted.lng.toFixed(4)}`;
+        if (seenKeys.has(dedupeKey)) continue;
+        seenKeys.add(dedupeKey);
+        collected.push(formatted);
+        if (collected.length >= safeLimit) break;
+      }
+
+      if (collected.length > 0) {
+        break;
+      }
+    } catch {
+      // Continuar al siguiente intento
+    }
+  }
+
+  if (collected.length > 0) {
+    await setCache(cacheKey, collected, 86400);
+  }
+
+  return collected;
+}
+
 function calcHaversineRoadKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -161,6 +310,22 @@ export async function routingRoutes(app: FastifyInstance): Promise<void> {
       });
     }
     return reply.send(coords);
+  });
+
+  // 1.6 AUTOCOMPLETADO Y BÚSQUEDA DE DIRECCIONES EN SMA CON CACHÉ REDIS
+  app.get('/api/routing/search', async (request, reply) => {
+    const { q, limit } = request.query as { q?: string; limit?: string };
+    const cleaned = (q || '').trim();
+    if (cleaned.length < 2) {
+      return reply.send({ results: [] });
+    }
+
+    const parsedLimit = limit ? Number(limit) : 6;
+    const results = await searchAddressesInSma(
+      cleaned,
+      Number.isFinite(parsedLimit) ? parsedLimit : 6
+    );
+    return reply.send({ results });
   });
 
   // 2. TRAZADO DE RUTA EN MOTO OSRM CON CACHÉ REDIS (TTL 6 HORAS)
