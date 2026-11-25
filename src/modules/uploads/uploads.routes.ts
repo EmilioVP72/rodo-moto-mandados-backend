@@ -17,17 +17,29 @@ export async function uploadsRoutes(app: FastifyInstance): Promise<void> {
     const { folder, referenceId, dataUrl } = (request.body || {}) as Record<string, unknown>;
     const user = request.authUser!;
     if (!await hasActiveAccount(request)) return reply.code(403).send();
+    let resolvedOrderId: string | null = null;
     if (folder === 'restaurants') {
       if (user.role !== 'ADMIN') return reply.code(403).send();
     } else {
-      if (!isOrderFolder(folder) || typeof referenceId !== 'string') return reply.code(400).send({ error: 'Tipo de evidencia o pedido inválido.' });
-      const order = await prisma.order.findUnique({ where: { id: referenceId } });
+      if (!isOrderFolder(folder) || typeof referenceId !== 'string' || !referenceId.trim()) {
+        return reply.code(400).send({ error: 'Tipo de evidencia o pedido inválido.' });
+      }
+      const cleanRef = referenceId.trim();
+      const normalizedRef = cleanRef.replace(/_(signature|photo)$/i, '');
+      const order =
+        (await prisma.order.findUnique({ where: { id: cleanRef } })) ||
+        (normalizedRef !== cleanRef
+          ? await prisma.order.findUnique({ where: { id: normalizedRef } })
+          : null);
       if (!order || !mayAccessOrderEvidence(user, order, folder)) return reply.code(404).send();
+      resolvedOrderId = order.id;
     }
     const image = await saveImage(folder, dataUrl);
     if (!image) return reply.code(400).send({ error: 'Usa una imagen JPG, PNG o WebP válida de hasta 4 MB.' });
     try {
-      if (isOrderFolder(folder)) await prisma.orderUpload.create({ data: { url: image.url, orderId: referenceId as string } });
+      if (isOrderFolder(folder) && resolvedOrderId) {
+        await prisma.orderUpload.create({ data: { url: image.url, orderId: resolvedOrderId } });
+      }
     } catch (error) { await image.discard(); throw error; }
     return reply.code(201).send({ url: image.url, sizeBytes: image.sizeBytes });
   });
