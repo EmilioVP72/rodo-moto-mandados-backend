@@ -130,14 +130,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     if (existingByIne) {
       if (existingByIne.pendingDebt > 0 || existingByIne.status === 'bloqueado_fraude') {
         return reply.status(403).send({
-          error: `⚠️ INE BLOQUEADO POR ADEUDO: La credencial terminación ${cleanDigits.slice(-4)} tiene un adeudo pendiente de $${existingByIne.pendingDebt.toFixed(2)} MXN (Folio ${existingByIne.debtOrderFolio || 'S/N'}).`,
-          blockedAccount: serializeUserAccount(existingByIne),
+          error:
+            'Esta credencial registra una restricción o adeudo pendiente en el sistema. Inicia sesión con tu cuenta registrada o contacta a soporte RODO.',
         });
       }
 
       return reply.status(409).send({
-        error: `⚠️ CREDENCIAL YA REGISTRADA: Estos 10 dígitos de INE ya están vinculados a otra cuenta activa (${existingByIne.email.slice(0, 3)}***). Inicia sesión o recupera tu contraseña.`,
-        blockedAccount: serializeUserAccount(existingByIne),
+        error:
+          'Esta credencial ya está vinculada a una cuenta registrada. Inicia sesión o usa "Recuperar contraseña".',
       });
     }
 
@@ -149,8 +149,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     if (existingByEmail) {
       if (existingByEmail.pendingDebt > 0 || existingByEmail.status === 'bloqueado_fraude') {
         return reply.status(403).send({
-          error: `Esta cuenta registra un adeudo pendiente de $${existingByEmail.pendingDebt.toFixed(2)} MXN.`,
-          blockedAccount: serializeUserAccount(existingByEmail),
+          error:
+            'Esta cuenta registra una restricción o adeudo pendiente. Inicia sesión o contacta a soporte RODO.',
         });
       }
       return reply.status(409).send({
@@ -303,30 +303,33 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    // Verificar bloqueo por deuda o fraude (solo para clientes)
-    if (user.role !== 'ADMIN' && (user.status === 'bloqueado_fraude' || user.pendingDebt > 0)) {
-      const maskedBlockedIne = maskIneDigits(user.ine10Digits);
-      return reply.status(403).send({
-        error: `Acceso bloqueado: Esta cuenta (INE ****${(maskedBlockedIne || '').slice(-4)}) registra un adeudo pendiente de $${user.pendingDebt.toFixed(2)} MXN. Liquida el saldo para reactivar tu servicio.`,
-        blockedAccount: serializeUserAccount(user),
-      });
-    }
-
-    // Verificación criptográfica de contraseña (bcrypt)
-    let isPasswordValid = await bcrypt.compare(cleanPass, user.passwordHash);
-
-    // Para el administrador, permitir también el passcode configurado en Setting.adminPasscode
-    if (!isPasswordValid && user.role === 'ADMIN') {
-      const settingsDoc = await prisma.setting.findUnique({ where: { id: 'general' } });
-      const configuredPasscode = (settingsDoc?.payload as any)?.adminPasscode;
-      if (configuredPasscode && cleanPass === String(configuredPasscode)) {
-        isPasswordValid = true;
-      }
-    }
+    // 1) SIEMPRE verificar primero la contraseña con bcrypt antes de informar estado de bloqueo/adeudo
+    //    (Jamás aceptar contraseñas en texto plano de Setting.payload.adminPasscode ni filtrar PII sin autenticar)
+    const isPasswordValid = await bcrypt.compare(cleanPass, user.passwordHash);
 
     if (!isPasswordValid) {
       return reply.status(401).send({
         error: 'Correo o contraseña incorrectos. Si olvidaste tu contraseña, usa "Recuperar contraseña".',
+      });
+    }
+
+    // 2) Solo tras probar la contraseña correcta, informar bloqueo por deuda o fraude sin exponer PII completa
+    if (user.role !== 'ADMIN' && (user.status === 'bloqueado_fraude' || user.pendingDebt > 0)) {
+      return reply.status(403).send({
+        error:
+          user.pendingDebt > 0
+            ? `Acceso bloqueado: Tu cuenta registra un adeudo pendiente de $${user.pendingDebt.toFixed(2)} MXN${
+                user.debtOrderFolio ? ` (Folio ${user.debtOrderFolio})` : ''
+              }. Liquida el saldo con soporte RODO para reactivar tu servicio.`
+            : 'Acceso bloqueado: Tu cuenta se encuentra suspendida por seguridad. Contacta a soporte RODO.',
+        debtSummary:
+          user.pendingDebt > 0
+            ? {
+                pendingDebt: user.pendingDebt,
+                debtOrderFolio: user.debtOrderFolio || null,
+                debtReason: user.debtReason || null,
+              }
+            : undefined,
       });
     }
 
@@ -672,6 +675,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(401).send({ error: 'La contraseña actual es incorrecta.' });
       }
       updateData.passwordHash = await bcrypt.hash(parsed.data.newPassword, BCRYPT_ROUNDS);
+      // Revocar sesiones activas en otros dispositivos al cambiar la contraseña
+      await prisma.refreshSession.updateMany({
+        where: {
+          userId: authUser.sub,
+          revokedAt: null,
+          ...(authUser.sid ? { id: { not: authUser.sid } } : {}),
+        },
+        data: { revokedAt: new Date() },
+      });
     }
 
     const updated = await prisma.user.update({
