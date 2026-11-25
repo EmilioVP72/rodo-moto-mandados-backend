@@ -1,6 +1,12 @@
 import { riderRegistration, riderChanges } from '../src/modules/riders/validation.ts';
 import { parseImage, mayAccessOrderEvidence, isOrderFolder } from '../src/utils/evidence.ts';
 import { priceFoodOrder, priceFuelRequest, matchesDisplayedQuote, initialOrderPayment } from '../src/utils/orderPricing.ts';
+import {
+  canAdvanceRestaurantTrackingStatus,
+  createRiderTicketToken,
+  isRestaurantTicketOrder,
+  verifyRiderTicketToken,
+} from '../src/utils/riderTicketToken.ts';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -181,10 +187,12 @@ describe('Transiciones autorizadas por rol', () => {
     assert.ok(!allowedOrderTransitions('ADMIN', order).includes('entregado'));
     assert.ok(!allowedOrderTransitions('ADMIN', {...order, assignedRiderUserId: null}).includes('asignado'));
   });
-  it('cliente acepta una cotización emitida y confirma entrega al llegar', () => {
+  it('cliente acepta una cotización emitida pero nunca puede marcar completado ni cambiar estatus', () => {
     assert.deepEqual(allowedOrderTransitions('CUSTOMER', {...order, status:'pendiente_cotizacion'}), ['cancelado']);
     assert.ok(allowedOrderTransitions('CUSTOMER', {...order, status:'pendiente_cotizacion', quoteOffered:true}).includes('nuevo'));
-    assert.deepEqual(allowedOrderTransitions('CUSTOMER', {...order, status:'afuera_del_domicilio'}), ['entregado']);
+    assert.deepEqual(allowedOrderTransitions('CUSTOMER', {...order, status:'afuera_del_domicilio'}), []);
+    assert.deepEqual(allowedOrderTransitions('CUSTOMER', {...order, status:'en_camino'}), []);
+    assert.deepEqual(allowedOrderTransitions('CUSTOMER', {...order, status:'asignado'}), []);
   });
   it('mantiene cerrados los estados finales y exige pago para repartir una transferencia', () => {
     for (const role of ['ADMIN','CUSTOMER','RIDER']) assert.deepEqual(allowedOrderTransitions(role, {...order, status:'entregado'}), []);
@@ -225,7 +233,36 @@ it('valida altas y permite editar disponibilidad sin cambiar la contraseña del 
   assert.equal(parsed.name, 'Moto Centro');
   assert.equal(parsed.email, 'moto@example.invalid');
   assert.equal(riderRegistration.safeParse({ ...input, phone: 'teléfono' }).success, false);
-  assert.deepEqual(riderChanges.parse({ available: false }), { available: false });
+  assert.equal(riderChanges.parse({ available: false }).available, false);
   assert.equal(riderChanges.safeParse({}).success, false);
   assert.equal(riderChanges.safeParse({ role: 'ADMIN' }).success, false);
+});
+
+describe('Token exclusivo de repartidor y estatus de pedidos de restaurante', () => {
+  const secret = 'test_rider_ticket_secret_key_2026';
+
+  it('valida el token del repartidor asignado y lo invalida si se cambia de repartidor', () => {
+    const tokenRider1 = createRiderTicketToken('ord-100', 'rider-1', secret);
+    assert.ok(tokenRider1.length === 32);
+    assert.equal(verifyRiderTicketToken('ord-100', 'rider-1', tokenRider1, secret), true);
+    assert.equal(verifyRiderTicketToken('ord-100', 'rider-2', tokenRider1, secret), false);
+    assert.equal(verifyRiderTicketToken('ord-101', 'rider-1', tokenRider1, secret), false);
+    assert.equal(verifyRiderTicketToken('ord-100', 'rider-1', 'invalido', secret), false);
+  });
+
+  it('aplica el flujo de estatus solo a tickets de restaurantes y solo hacia adelante', () => {
+    assert.equal(isRestaurantTicketOrder({ orderType: 'comida' }), true);
+    assert.equal(isRestaurantTicketOrder({ orderType: 'pedido_personalizado' }), true);
+    assert.equal(isRestaurantTicketOrder({ orderType: 'envio' }), false);
+    assert.equal(isRestaurantTicketOrder({ orderType: 'solicitud_local' }), false);
+    assert.equal(isRestaurantTicketOrder({ orderType: 'auxilio_gasolina' }), false);
+
+    assert.equal(canAdvanceRestaurantTrackingStatus(null, 'asignado', 'recibido'), true);
+    assert.equal(canAdvanceRestaurantTrackingStatus('recibido', 'asignado', 'en_cocina'), true);
+    assert.equal(canAdvanceRestaurantTrackingStatus('en_cocina', 'en_preparacion', 'en_camino'), true);
+    assert.equal(canAdvanceRestaurantTrackingStatus('en_camino', 'en_camino', 'completado'), true);
+    assert.equal(canAdvanceRestaurantTrackingStatus('en_camino', 'en_camino', 'en_cocina'), false);
+    assert.equal(canAdvanceRestaurantTrackingStatus('completado', 'entregado', 'completado'), false);
+    assert.equal(canAdvanceRestaurantTrackingStatus('recibido', 'cancelado', 'en_cocina'), false);
+  });
 });

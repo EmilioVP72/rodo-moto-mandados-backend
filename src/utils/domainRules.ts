@@ -101,8 +101,7 @@ export function allowedOrderTransitions(role: string, order: {
   if (!isOrderStatus(order.status)) return [];
   if (role === 'CUSTOMER' || role === 'PARTNER_LOCAL') {
     if (order.status === 'pendiente_cotizacion') return order.quoteOffered ? ['nuevo', 'cancelado'] : ['cancelado'];
-    if (order.status !== 'afuera_del_domicilio') return [];
-    return order.paymentMethod === 'transferencia' && order.paymentStatus !== 'verificado' ? [] : ['entregado'];
+    return [];
   }
   const targets = role === 'ADMIN' ? ADMIN_TRANSITIONS[order.status] : role === 'RIDER' ? RIDER_STATUS_TRANSITIONS[order.status] || [] : [];
   const hasAssignedRider = Boolean(order.assignedRiderUserId || order.assignedRiderName);

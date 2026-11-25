@@ -4,13 +4,25 @@ import { FastifyInstance, type RouteHandlerMethod } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../infra/prisma.js';
 import { emitOrderEvent, emitAdminEvent } from '../../infra/socket.js';
-import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
+import { requireAuth, requireAdmin, verifyAuthToken } from '../../middlewares/auth.js';
+import { env } from '../../config/env.js';
 import {
   allowedOrderTransitions, isOrderStatus,
   getServerCustomerCashLimit,
   validateSpeiTrackingKeyFormat,
 
 } from '../../utils/domainRules.js';
+import {
+  RESTAURANT_TRACKING_LABELS,
+  RestaurantTrackingStatus,
+  canAdvanceRestaurantTrackingStatus,
+  createRiderTicketToken,
+  getOrderAssignedRiderKey,
+  isRestaurantTicketOrder,
+  isRestaurantTrackingStatus,
+  mapRestaurantTrackingToOrderStatus,
+  verifyRiderTicketToken,
+} from '../../utils/riderTicketToken.js';
 
 import { quoteExpressDelivery } from '../routing/routing.routes.js';
 import { initialOrderPayment, money, priceFoodOrder, priceFuelRequest, matchesDisplayedQuote, PriceError } from '../../utils/orderPricing.js';
@@ -77,6 +89,20 @@ export function mapOrderRowToPayload(row: any) {
   };
 }
 
+function withAdminDispatchToken<T extends Record<string, any>>(
+  row: { id: string; assignedRiderUserId?: string | null; assignedRiderName?: string | null; payload?: unknown },
+  mapped: T,
+  isAdmin: boolean
+): T & { riderDispatchToken?: string } {
+  if (!isAdmin) return mapped;
+  const riderKey = getOrderAssignedRiderKey(row);
+  if (!riderKey) return mapped;
+  return {
+    ...mapped,
+    riderDispatchToken: createRiderTicketToken(row.id, riderKey, env.JWT_SECRET),
+  };
+}
+
 export async function ordersRoutes(app: FastifyInstance): Promise<void> {
   // =========================================================================
   // 1. LISTAR ÓRDENES (AISLAMIENTO ESTRICTO: CLIENTE SOLO VE SUS PROPIAS ÓRDENES)
@@ -104,7 +130,10 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       take: takeCount,
     });
 
-    return reply.send(rows.map(mapOrderRowToPayload));
+    const isAdmin = authUser.role === 'ADMIN';
+    return reply.send(
+      rows.map((row) => withAdminDispatchToken(row, mapOrderRowToPayload(row), isAdmin))
+    );
   });
 
   // =========================================================================
@@ -211,7 +240,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       take: takeCount,
     });
 
-    const mapped = rows.map(mapOrderRowToPayload);
+    const mapped = rows.map((row) => withAdminDispatchToken(row, mapOrderRowToPayload(row), true));
     const cutoff24h = Date.now() - 24 * 60 * 60 * 1000;
     const summary = mapped.reduce(
       (acc, order: any) => {
@@ -276,7 +305,9 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    return reply.send(mapOrderRowToPayload(order));
+    return reply.send(
+      withAdminDispatchToken(order, mapOrderRowToPayload(order), authUser.role === 'ADMIN')
+    );
   });
 
   // =========================================================================
@@ -895,7 +926,7 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
         arrivalExpiresAt: (mapped as any).arrivalExpiresAt || new Date(now.getTime() + 10 * 60 * 1000).toISOString(),
       });
     }
-    return reply.send(mapped);
+    return reply.send(withAdminDispatchToken(updated, mapped, isAdmin));
   });
 
   // =========================================================================
@@ -972,6 +1003,217 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       arrivalExpiresAt: expiresIso,
     });
 
-    return reply.send(mapped);
+    return reply.send(withAdminDispatchToken(updated, mapped, isAdmin));
+  });
+
+  // =========================================================================
+  // 8. ENLACE EXCLUSIVO DEL REPARTIDOR PARA TICKETS DE RESTAURANTES
+  //    (Solo el repartidor asignado puede consultar con su token y actualizar estatus)
+  // =========================================================================
+  function getOptionalAuthUser(request: { headers: { authorization?: string } }) {
+    const authHeader = request.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
+    return verifyAuthToken(authHeader.slice(7).trim());
+  }
+
+  function sanitizeOrderForRiderView(mapped: Record<string, any>) {
+    const {
+      customerEmail: _customerEmail,
+      riderDispatchToken: _riderDispatchToken,
+      ...safe
+    } = mapped;
+    return safe;
+  }
+
+  app.get('/api/orders/rider-ticket/:folio', async (request, reply) => {
+    const { folio } = request.params as { folio: string };
+    const { token } = request.query as { token?: string };
+    const cleanRef = (folio || '').trim();
+    if (!cleanRef) {
+      return reply.status(400).send({ error: 'Folio de ticket inválido.' });
+    }
+
+    const order = await prisma.order.findFirst({
+      where: {
+        OR: [
+          { id: cleanRef },
+          { folio: { equals: cleanRef, mode: 'insensitive' } },
+        ],
+      },
+      include: {
+        items: true,
+        statusHistory: { orderBy: { createdAt: 'desc' }, take: 10 },
+      },
+    });
+
+    if (!order) {
+      return reply.status(404).send({ error: 'Ticket no encontrado.' });
+    }
+
+    const authUser = getOptionalAuthUser(request);
+    const riderKey = getOrderAssignedRiderKey(order);
+    const isAuthenticatedAssignedRider =
+      Boolean(authUser && authUser.role === 'RIDER' && order.assignedRiderUserId === authUser.sub);
+    const hasValidRiderToken = Boolean(riderKey && verifyRiderTicketToken(order.id, riderKey, token, env.JWT_SECRET));
+
+    if (!isAuthenticatedAssignedRider && !hasValidRiderToken) {
+      return reply.status(403).send({
+        error: 'Este enlace de repartidor no es válido o el pedido fue reasignado a otro repartidor.',
+      });
+    }
+
+    const mapped = mapOrderRowToPayload(order);
+    return reply.send({
+      order: sanitizeOrderForRiderView(mapped),
+      canUpdateRestaurantStatus: isRestaurantTicketOrder(order),
+    });
+  });
+
+  app.post('/api/orders/rider-ticket/:id/status', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body || {}) as { status?: unknown; token?: unknown };
+
+    if (!isRestaurantTrackingStatus(body.status)) {
+      return reply.status(400).send({
+        error: 'Estatus inválido. Usa: recibido, en_cocina, en_camino o completado.',
+      });
+    }
+
+    const existing = await prisma.order.findFirst({
+      where: {
+        OR: [
+          { id },
+          { folio: { equals: id, mode: 'insensitive' } },
+        ],
+      },
+    });
+
+    if (!existing) {
+      return reply.status(404).send({ error: 'Pedido no encontrado.' });
+    }
+
+    if (!isRestaurantTicketOrder(existing)) {
+      return reply.status(400).send({
+        error: 'Estas actualizaciones de estatus solo aplican para pedidos de restaurantes.',
+      });
+    }
+
+    const authUser = getOptionalAuthUser(request);
+    const riderKey = getOrderAssignedRiderKey(existing);
+    const isAuthenticatedAssignedRider =
+      Boolean(authUser && authUser.role === 'RIDER' && existing.assignedRiderUserId === authUser.sub);
+    const hasValidRiderToken = Boolean(riderKey && verifyRiderTicketToken(existing.id, riderKey, body.token, env.JWT_SECRET));
+
+    if (!isAuthenticatedAssignedRider && !hasValidRiderToken) {
+      return reply.status(403).send({
+        error: 'Solo el repartidor asignado mediante su enlace oficial puede actualizar el estatus de este pedido.',
+      });
+    }
+
+    const prevPayload = (existing.payload || {}) as Record<string, any>;
+    const currentTracking = isRestaurantTrackingStatus(prevPayload.restaurantTrackingStatus)
+      ? prevPayload.restaurantTrackingStatus
+      : null;
+    const nextTracking: RestaurantTrackingStatus = body.status;
+
+    if (!canAdvanceRestaurantTrackingStatus(currentTracking, existing.status, nextTracking)) {
+      return reply.status(409).send({
+        error:
+          existing.status === 'entregado'
+            ? 'Este pedido ya fue marcado como completado.'
+            : 'No se puede regresar a un estatus anterior o actualizar un pedido cancelado.',
+      });
+    }
+
+    const nextCanonicalStatus = mapRestaurantTrackingToOrderStatus(nextTracking);
+    const statusLabel = RESTAURANT_TRACKING_LABELS[nextTracking];
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const riderName = existing.assignedRiderName || 'Repartidor RODO';
+
+    const mergedPayload: Record<string, any> = {
+      ...prevPayload,
+      status: nextCanonicalStatus,
+      restaurantTrackingStatus: nextTracking,
+      restaurantStatusUpdatedAt: nowIso,
+      restaurantStatusUpdatedBy: riderName,
+      updatedAt: nowIso,
+    };
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const changed = await tx.order.updateMany({
+        where: {
+          id: existing.id,
+          status: existing.status,
+          updatedAt: existing.updatedAt,
+        },
+        data: {
+          status: nextCanonicalStatus,
+          payload: mergedPayload,
+        },
+      });
+      if (changed.count !== 1) return null;
+
+      await tx.orderStatusHistory.create({
+        data: {
+          orderId: existing.id,
+          fromStatus: existing.status,
+          toStatus: nextCanonicalStatus,
+          changedByUserId: authUser?.sub || existing.assignedRiderUserId || 'rider-link',
+          changedByRole: 'RIDER',
+          note: `Repartidor (${riderName}) actualizó estatus a: ${statusLabel}`,
+        },
+      });
+
+      if (nextCanonicalStatus === 'entregado' && existing.status !== 'entregado') {
+        await tx.user.update({
+          where: { id: existing.customerId },
+          data: { completedOrdersCount: { increment: 1 } },
+        });
+      }
+
+      return tx.order.findUniqueOrThrow({
+        where: { id: existing.id },
+        include: { items: true, statusHistory: { orderBy: { createdAt: 'desc' }, take: 10 } },
+      });
+    });
+
+    if (!updated) {
+      return reply.status(409).send({
+        error: 'El pedido cambió mientras se actualizaba. Recarga el ticket e intenta de nuevo.',
+      });
+    }
+
+    const mapped = mapOrderRowToPayload(updated);
+    emitOrderEvent('orders:updated', mapped);
+    emitOrderEvent('order:restaurant-status', {
+      id: mapped.id,
+      folio: mapped.folio,
+      customerId: mapped.customerId,
+      assignedRiderUserId: mapped.assignedRiderUserId,
+      assignedRiderName: riderName,
+      restaurantName: mapped.restaurantName,
+      trackingStatus: nextTracking,
+      statusLabel,
+      updatedAt: nowIso,
+    });
+
+    if (nextCanonicalStatus === 'entregado' && existing.status !== 'entregado') {
+      emitAdminEvent('admin:order-delivered', {
+        id: mapped.id,
+        folio: mapped.folio,
+        customerName: mapped.customerName,
+        restaurantName: mapped.restaurantName,
+        assignedRiderName: riderName,
+        total: mapped.total,
+        deliveredAt: nowIso,
+      });
+    }
+
+    return reply.send({
+      order: sanitizeOrderForRiderView(mapped),
+      trackingStatus: nextTracking,
+      statusLabel,
+    });
   });
 }
