@@ -10,6 +10,7 @@ import { connectDatabase, prisma } from './infra/prisma.js';
 import { getRedisClient, invalidateCache } from './infra/redis.js';
 import { initSocketServer } from './infra/socket.js';
 import { runInitialDatabaseSeed } from './utils/seed.js';
+import { requireAdmin } from './middlewares/auth.js';
 import { authRoutes } from './modules/auth/auth.routes.js';
 import { catalogRoutes } from './modules/catalog/catalog.routes.js';
 import { ordersRoutes } from './modules/orders/orders.routes.js';
@@ -74,8 +75,8 @@ async function bootstrap() {
     };
   });
 
-  // 4. Endpoint de sincronización inicial de catálogo y configuración semilla
-  app.post('/api/seed', async (request, reply) => {
+  // 4. Endpoint administrativo de sincronización inicial de catálogo y configuración semilla
+  app.post('/api/seed', { preHandler: [requireAdmin] }, async (request, reply) => {
     const body = request.body as {
       restaurants?: any[];
       settings?: Record<string, unknown>;
@@ -86,7 +87,6 @@ async function bootstrap() {
     const currentRestCount = await prisma.restaurant.count();
 
     // Solo sembrar el catálogo inicial una única vez cuando la BD está completamente virgen
-    // (si ya existe Setting 'general', respetamos las eliminaciones del administrador)
     if (!existingSettings && currentRestCount === 0 && Array.isArray(body?.restaurants) && body.restaurants.length > 0) {
       for (const r of body.restaurants) {
         if (!r?.id || !r?.name) continue;
@@ -110,11 +110,14 @@ async function bootstrap() {
       await invalidateCache('rodo:catalog:restaurants');
     }
 
-    if (!existingSettings && body?.settings) {
+    if (!existingSettings && body?.settings && typeof body.settings === 'object') {
+      const safeSettings = { ...body.settings };
+      delete safeSettings.adminPasscode;
+      delete safeSettings.ridersList;
       await prisma.setting.create({
         data: {
           id: 'general',
-          payload: body.settings as any,
+          payload: safeSettings as any,
         },
       });
       await invalidateCache('rodo:settings:general');

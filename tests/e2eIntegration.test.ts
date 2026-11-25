@@ -95,8 +95,19 @@ describe('End-to-End Integration Tests (Relational PostgreSQL + Auth + Password 
     assert.ok(adminLogin.data.refreshToken);
     adminToken = adminLogin.data.token;
 
+    // /api/seed y /api/partner-locals deben rechazar solicitudes sin sesión de Administrador
+    const unauthSeed = await e2eFetch('/api/seed', {
+      method: 'POST',
+      body: JSON.stringify({ restaurants: [], settings: {} }),
+    });
+    assert.equal(unauthSeed.status, 401);
+
+    const unauthPartnerLocals = await e2eFetch('/api/partner-locals');
+    assert.equal(unauthPartnerLocals.status, 401);
+
     const seedRes = await e2eFetch('/api/seed', {
       method: 'POST',
+      headers: { Authorization: 'Bearer ' + adminToken },
       body: JSON.stringify({
         restaurants: [
           {
