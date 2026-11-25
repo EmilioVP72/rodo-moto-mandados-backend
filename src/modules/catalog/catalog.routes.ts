@@ -3,10 +3,18 @@ import { FastifyInstance } from 'fastify';
 import { prisma } from '../../infra/prisma.js';
 import { getCache, setCache, invalidateCache } from '../../infra/redis.js';
 import { broadcastEvent, emitAdminEvent } from '../../infra/socket.js';
-import { requireAdmin } from '../../middlewares/auth.js';
+import { extractUserFromRequest, requireAdmin } from '../../middlewares/auth.js';
 
 const RESTAURANTS_CACHE_KEY = 'rodo:catalog:restaurants';
 const PARTNER_LOCALS_CACHE_KEY = 'rodo:catalog:partner_locals';
+
+function sanitizeRestaurantForClient(item: Record<string, unknown>, isAdmin: boolean): Record<string, unknown> {
+  if (isAdmin) return item;
+  const copy = { ...item };
+  delete copy.localCode;
+  delete copy.contactPerson;
+  return copy;
+}
 
 function normalizePinCode(raw?: unknown): string {
   return String(raw || '').replace(/[^0-9]/g, '').slice(0, 4);
@@ -53,11 +61,12 @@ function pickRandomUniquePin(usedCodes: Set<string>): string {
 }
 
 export async function catalogRoutes(app: FastifyInstance): Promise<void> {
-  // 1. RESTAURANTES Y COMERCIOS
-  app.get('/api/restaurants', async (_request, reply) => {
+  // 1. RESTAURANTES Y COMERCIOS (Oculta códigos PIN internos a visitantes y clientes)
+  app.get('/api/restaurants', async (request, reply) => {
+    const isAdmin = extractUserFromRequest(request)?.role === 'ADMIN';
     const cached = await getCache<any[]>(RESTAURANTS_CACHE_KEY);
     if (Array.isArray(cached)) {
-      return reply.send(cached);
+      return reply.send(cached.map((r) => sanitizeRestaurantForClient(r, isAdmin)));
     }
 
     const rows = await prisma.restaurant.findMany({
@@ -77,7 +86,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     }));
 
     await setCache(RESTAURANTS_CACHE_KEY, list, 120);
-    return reply.send(list);
+    return reply.send(list.map((r) => sanitizeRestaurantForClient(r, isAdmin)));
   });
 
   app.put('/api/restaurants/:id', { preHandler: [requireAdmin] }, async (request, reply) => {
@@ -177,7 +186,8 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
 
     await invalidateCache(RESTAURANTS_CACHE_KEY);
     await invalidateCache(PARTNER_LOCALS_CACHE_KEY);
-    broadcastEvent('restaurants:updated', restaurantPayload);
+    broadcastEvent('restaurants:updated', sanitizeRestaurantForClient(restaurantPayload, false));
+    emitAdminEvent('restaurants:admin-updated', restaurantPayload);
     return reply.send(restaurantPayload);
   });
 
@@ -195,8 +205,8 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ ok: true, id });
   });
 
-  // 2. LOCALES ASOCIADOS CON CÓDIGO PIN DE 3 DÍGITOS
-  app.get('/api/partner-locals', async (_request, reply) => {
+  // 2. LOCALES ASOCIADOS CON CÓDIGO PIN DE 3 DÍGITOS (LISTADO EXCLUSIVO PARA ADMIN)
+  app.get('/api/partner-locals', { preHandler: [requireAdmin] }, async (_request, reply) => {
     const cached = await getCache<any[]>(PARTNER_LOCALS_CACHE_KEY);
     if (cached && cached.length > 0) {
       return reply.send(cached);
@@ -223,29 +233,34 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(list);
   });
 
-  app.get('/api/partner-locals/code/:code', async (request, reply) => {
-    const { code } = request.params as { code: string };
-    const cleanCode = code.trim();
-    const local = await prisma.partnerLocal.findUnique({
-      where: { code: cleanCode },
-    });
+  app.get(
+    '/api/partner-locals/code/:code',
+    { config: { rateLimit: { max: 8, timeWindow: '15 minutes' } } },
+    async (request, reply) => {
+      const { code } = request.params as { code: string };
+      const cleanCode = code.trim();
+      if (!/^\d{3,4}$/.test(cleanCode)) {
+        return reply.status(404).send({ error: 'Código de local no encontrado o inactivo.' });
+      }
+      const local = await prisma.partnerLocal.findUnique({
+        where: { code: cleanCode },
+      });
 
-    if (!local || !local.isActive) {
-      return reply.status(404).send({ error: 'Código de local no encontrado o inactivo.' });
+      if (!local || !local.isActive) {
+        return reply.status(404).send({ error: 'Código de local no encontrado o inactivo.' });
+      }
+
+      return reply.send({
+        id: local.id,
+        code: local.code,
+        name: local.name,
+        phone: local.phone,
+        serviceFee: local.serviceFee,
+        address: local.address,
+        isActive: local.isActive,
+      });
     }
-
-    return reply.send({
-      id: local.id,
-      code: local.code,
-      name: local.name,
-      phone: local.phone,
-      serviceFee: local.serviceFee,
-      address: local.address,
-      contactPerson: local.contactPerson || undefined,
-      notes: local.notes || undefined,
-      isActive: local.isActive,
-    });
-  });
+  );
 
   app.put('/api/partner-locals/:id', { preHandler: [requireAdmin] }, async (request, reply) => {
     const { id } = request.params as { id: string };
