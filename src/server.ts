@@ -23,7 +23,8 @@ import { ridersRoutes } from './modules/riders/riders.routes.js';
 async function bootstrap() {
   const app = Fastify({
     logger: env.NODE_ENV === 'development',
-    trustProxy: true,
+    // Solo confiar en cabeceras X-Forwarded-For provenientes del reverse proxy local / red interna Docker
+    trustProxy: ['127.0.0.1', '::1', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'],
     bodyLimit: 8 * 1024 * 1024, // 8 MB para permitir imágenes de evidencia o catálogos
   });
 

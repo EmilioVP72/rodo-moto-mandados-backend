@@ -41,7 +41,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-rodo_user}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio en produccion}@${POSTGRES_HOST:-rodo-db-1}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-rodo_db}?schema=public
       REDIS_URL: redis://rodo-redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET es obligatorio en produccion}
-      INE_ENCRYPTION_KEY: ${INE_ENCRYPTION_KEY:-}
+      INE_ENCRYPTION_KEY: ${INE_ENCRYPTION_KEY:?INE_ENCRYPTION_KEY es obligatorio en produccion}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-edsoncruz14999@gmail.com}
       ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:?ADMIN_INITIAL_PASSWORD es obligatorio en produccion}
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
@@ -79,7 +79,7 @@ services:
       rodo-api:
         condition: service_healthy
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8080}:80"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/api/health || exit 1"]
       interval: 15s
