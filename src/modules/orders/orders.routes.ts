@@ -951,6 +951,12 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(409).send({ error: 'Este pedido ya fue cerrado y no admite aviso de llegada.' });
     }
 
+    if (!getOrderAssignedRiderKey(existing)) {
+      return reply.status(422).send({
+        error: 'Primero asigna un repartidor al pedido antes de avisar al cliente que está afuera.',
+      });
+    }
+
     const now = new Date();
     const nowIso = now.toISOString();
     const expiresIso = new Date(now.getTime() + 10 * 60 * 1000).toISOString();
