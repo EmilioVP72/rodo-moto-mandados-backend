@@ -10,6 +10,238 @@ const EXPRESS_SURCHARGE_MXN = 25;
 // Bounding box de San Miguel de Allende, Guanajuato (oeste, norte, este, sur)
 const SMA_NOMINATIM_VIEWBOX = '-100.92,21.05,-100.55,20.76';
 
+const ALLOWED_MAPS_HOSTS = new Set([
+  'maps.app.goo.gl',
+  'goo.gl',
+  'google.com',
+  'www.google.com',
+  'maps.google.com',
+  'google.com.mx',
+  'www.google.com.mx',
+  'maps.google.com.mx',
+  'maps.apple.com',
+  'openstreetmap.org',
+  'www.openstreetmap.org',
+  'osm.org',
+]);
+
+export function isAllowedMapsUrl(rawUrl: string): URL | null {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+    const host = parsed.hostname.toLowerCase();
+    if (!ALLOWED_MAPS_HOSTS.has(host)) return null;
+    if (host === 'goo.gl' && !parsed.pathname.toLowerCase().startsWith('/maps')) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function extractCoordsFromMapsText(input: string): { lat: number; lng: number } | null {
+  if (!input) return null;
+  const decoded = (() => {
+    try {
+      return decodeURIComponent(input);
+    } catch {
+      return input;
+    }
+  })();
+
+  const toPair = (latStr: string, lngStr: string) => {
+    const lat = Number(latStr);
+    const lng = Number(lngStr);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180 || (lat === 0 && lng === 0)) return null;
+    return { lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)) };
+  };
+
+  // 1. Coordenadas exactas del pin en URLs de Google Maps (!3dLAT!4dLNG)
+  const bang = decoded.match(/!3d(-?\d{1,2}\.\d+)!4d(-?\d{1,3}\.\d+)/);
+  if (bang) return toPair(bang[1], bang[2]);
+
+  // 2. Parámetros q/query/ll/destination/center
+  const queryParam = decoded.match(
+    /[?&](?:q|query|ll|destination|center)=(-?\d{1,2}\.\d+)[,\s]+(-?\d{1,3}\.\d+)/i
+  );
+  if (queryParam) return toPair(queryParam[1], queryParam[2]);
+
+  // 3. OpenStreetMap (?mlat=lat&mlon=lng o #map=zoom/lat/lng)
+  const osmParam = decoded.match(/[?&]mlat=(-?\d{1,2}\.\d+)&mlon=(-?\d{1,3}\.\d+)/i);
+  if (osmParam) return toPair(osmParam[1], osmParam[2]);
+
+  const osmHash = decoded.match(/#map=\d+\/(-?\d{1,2}\.\d+)\/(-?\d{1,3}\.\d+)/i);
+  if (osmHash) return toPair(osmHash[1], osmHash[2]);
+
+  // 4. Viewport de Google Maps (@lat,lng)
+  const atMatch = decoded.match(/@(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)/);
+  if (atMatch) return toPair(atMatch[1], atMatch[2]);
+
+  // 5. Fallback en HTML/og:image de Google Maps (center=LAT,LNG o ll=LAT,LNG o [null,null,LAT,LNG])
+  const staticCenter = decoded.match(/(?:center|ll)=(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)/i);
+  if (staticCenter) return toPair(staticCenter[1], staticCenter[2]);
+
+  const direct = decoded.match(/^\s*(-?\d{1,2}\.\d{3,})\s*[,\s]\s*(-?\d{1,3}\.\d{3,})\s*$/);
+  if (direct) return toPair(direct[1], direct[2]);
+
+  return null;
+}
+
+function extractPlaceQueryFromGoogleMapsUrl(urlStr: string): string {
+  try {
+    const parsed = new URL(urlStr);
+    const placeMatch = parsed.pathname.match(/\/maps\/place\/([^/]+)/i);
+    if (placeMatch?.[1]) {
+      return decodeURIComponent(placeMatch[1].replace(/\+/g, ' ')).trim();
+    }
+    const q = parsed.searchParams.get('q') || parsed.searchParams.get('query') || '';
+    if (q && !extractCoordsFromMapsText(q)) {
+      return q.trim();
+    }
+  } catch {}
+  return '';
+}
+
+async function reverseGeocodeRaw(latNum: number, lngNum: number): Promise<any | null> {
+  const cacheKey = `rodo:geo:rev:${latNum.toFixed(4)}:${lngNum.toFixed(4)}`;
+  const cached = await getCache<any>(cacheKey);
+  if (cached) {
+    return { ...cached, cached: true };
+  }
+
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latNum}&lon=${lngNum}&zoom=18&addressdetails=1`;
+    const response = await fetch(url, {
+      headers: {
+        'Accept-Language': 'es-MX,es;q=0.9',
+        'User-Agent': 'RODO-MotoMandados-SMA-Server/1.0 (soporte@rodomotomandados.com)',
+      },
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    await setCache(cacheKey, data, 86400);
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+export interface ResolvedMapsLinkPayload {
+  lat: number;
+  lng: number;
+  mapsUrl: string;
+  resolvedUrl: string;
+  placeName: string;
+  street: string;
+  streetNumber: string;
+  neighborhood: string;
+  address: string;
+}
+
+async function resolveMapsLinkInSma(rawInput: string): Promise<ResolvedMapsLinkPayload | null> {
+  const cleaned = rawInput.trim();
+  if (!cleaned) return null;
+
+  const cacheKey = `rodo:geo:mapsurl:${cleaned.toLowerCase()}`;
+  const cached = await getCache<ResolvedMapsLinkPayload>(cacheKey);
+  if (cached && isValidCoordPair(cached)) {
+    return cached;
+  }
+
+  let resolvedUrl = cleaned;
+  let coords = extractCoordsFromMapsText(cleaned);
+
+  // Si es una URL de mapas válida (especialmente enlaces cortos maps.app.goo.gl / goo.gl/maps), resolvemos redirecciones
+  const parsedUrl = isAllowedMapsUrl(cleaned);
+  if (parsedUrl && (!coords || parsedUrl.hostname.includes('goo.gl'))) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 7000);
+    try {
+      const res = await fetch(parsedUrl.toString(), {
+        method: 'GET',
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept-Language': 'es-MX,es;q=0.9',
+        },
+      });
+      if (res.url && isAllowedMapsUrl(res.url)) {
+        resolvedUrl = res.url;
+        coords = extractCoordsFromMapsText(res.url) || coords;
+      }
+      if (!coords) {
+        const html = (await res.text()).slice(0, 80000);
+        coords = extractCoordsFromMapsText(html);
+      }
+    } catch {
+      // Continuar con fallback de texto si la redirección falló
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  const placeQuery = extractPlaceQueryFromGoogleMapsUrl(resolvedUrl);
+
+  // Si todavía no hay coordenadas pero sí venía un nombre/dirección en /maps/place/..., geocodificar en SMA
+  if (!coords && placeQuery) {
+    coords = await geocodeAddressInSma(placeQuery);
+  }
+
+  if (!coords) return null;
+
+  const rev = await reverseGeocodeRaw(coords.lat, coords.lng);
+  const addr = rev?.address || {};
+
+  let street = String(addr.road || addr.pedestrian || addr.street || addr.path || '').trim();
+  let streetNumber = addr.house_number
+    ? `#${String(addr.house_number).replace(/^#/, '').trim()}`
+    : '';
+  const neighborhood = String(
+    addr.neighbourhood || addr.suburb || addr.quarter || addr.residential || ''
+  ).trim();
+
+  // Si el enlace de Google Maps traía calle + número en /maps/place/... y Nominatim no detectó número, extraerlo
+  if (placeQuery) {
+    const firstSegment = placeQuery.split(',')[0]?.trim() || '';
+    if (!streetNumber) {
+      const numMatch = firstSegment.match(/(?:#|no\.?\s*)?(\d+[a-zA-Z]?(?:-\w+)?)\s*$/);
+      if (numMatch?.[1] && firstSegment.length > numMatch[1].length + 2) {
+        streetNumber = `#${numMatch[1]}`;
+      }
+    }
+    if (!street && firstSegment) {
+      street = firstSegment
+        .replace(/(?:#|no\.?\s*)?\b\d+[a-zA-Z]?(?:-\w+)?\s*$/i, '')
+        .trim();
+    }
+  }
+
+  const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${coords.lat},${coords.lng}`;
+  const addressParts = [
+    street ? `${street}${streetNumber ? ` ${streetNumber}` : ''}` : '',
+    neighborhood ? `Col. ${neighborhood}` : '',
+  ].filter(Boolean);
+
+  const payload: ResolvedMapsLinkPayload = {
+    lat: coords.lat,
+    lng: coords.lng,
+    mapsUrl,
+    resolvedUrl,
+    placeName: placeQuery ? placeQuery.split(',')[0]?.trim() || '' : '',
+    street,
+    streetNumber,
+    neighborhood,
+    address: addressParts.join(', ') || `Ubicación (${coords.lat.toFixed(5)}, ${coords.lng.toFixed(5)})`,
+  };
+
+  await setCache(cacheKey, payload, 86400);
+  return payload;
+}
+
 export interface SmaAddressSearchResult {
   id: string;
   label: string;
@@ -269,31 +501,44 @@ export async function routingRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'Coordenadas inválidas.' });
     }
 
-    const cacheKey = `rodo:geo:rev:${latNum.toFixed(4)}:${lngNum.toFixed(4)}`;
-    const cached = await getCache<any>(cacheKey);
-    if (cached) {
-      return reply.send({ ...cached, cached: true });
+    const data = await reverseGeocodeRaw(latNum, lngNum);
+    if (!data) {
+      return reply.status(502).send({ error: 'Servicio externo de geocodificación no disponible.' });
+    }
+    return reply.send(data);
+  });
+
+  // 1.7 RESOLVER ENLACE DE GOOGLE MAPS (INCLUYENDO ENLACES CORTOS maps.app.goo.gl)
+  const handleResolveMapsUrl = async (rawUrl: string | undefined, reply: any) => {
+    const cleaned = (rawUrl || '').trim();
+    if (!cleaned) {
+      return reply.status(400).send({ error: 'Pega un enlace de Google Maps válido.' });
     }
 
-    try {
-      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latNum}&lon=${lngNum}&zoom=18&addressdetails=1`;
-      const response = await fetch(url, {
-        headers: {
-          'Accept-Language': 'es-MX,es;q=0.9',
-          'User-Agent': 'RODO-MotoMandados-SMA-Server/1.0 (soporte@rodomotomandados.com)',
-        },
+    if (!extractCoordsFromMapsText(cleaned) && !isAllowedMapsUrl(cleaned)) {
+      return reply.status(400).send({
+        error: 'Enlace no reconocido. Pega un enlace de Google Maps (ej. maps.app.goo.gl/... o google.com/maps/...).',
       });
-
-      if (!response.ok) {
-        return reply.status(502).send({ error: 'Servicio externo de geocodificación no disponible.' });
-      }
-
-      const data = await response.json();
-      await setCache(cacheKey, data, 86400);
-      return reply.send(data);
-    } catch (err: any) {
-      return reply.status(502).send({ error: err?.message || 'Error al consultar Nominatim.' });
     }
+
+    const resolved = await resolveMapsLinkInSma(cleaned);
+    if (!resolved) {
+      return reply.status(422).send({
+        error: 'No pudimos extraer la ubicación de ese enlace. Verifica que sea un enlace compartido desde Google Maps.',
+      });
+    }
+
+    return reply.send(resolved);
+  };
+
+  app.post('/api/routing/resolve-maps-url', async (request, reply) => {
+    const body = (request.body || {}) as { url?: string };
+    return handleResolveMapsUrl(body.url, reply);
+  });
+
+  app.get('/api/routing/resolve-maps-url', async (request, reply) => {
+    const query = (request.query || {}) as { url?: string };
+    return handleResolveMapsUrl(query.url, reply);
   });
 
   // 1.5 GEOCODIFICACIÓN DIRECTA (TEXTO -> COORDENADAS EN SMA) CON CACHÉ REDIS
