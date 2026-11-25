@@ -6,6 +6,7 @@ import { prisma } from '../../infra/prisma.js';
 import { emitOrderEvent, emitAdminEvent } from '../../infra/socket.js';
 import { requireAuth, requireAdmin, verifyAuthToken } from '../../middlewares/auth.js';
 import { env } from '../../config/env.js';
+import { verifyAdminStepUpToken } from '../../utils/adminStepUp.js';
 import {
   allowedOrderTransitions, isOrderStatus,
   getServerCustomerCashLimit,
@@ -755,7 +756,27 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     const now = new Date();
     const nowIso = now.toISOString();
     const prevPayload = (existing.payload || {}) as Record<string, any>;
+    const submittedStepUpToken =
+      request.headers['x-admin-step-up'] || rawUpdates.stepUpToken;
+    delete updates.stepUpToken;
     delete updates.quoteOfferedAt;
+
+    if (
+      isAdmin &&
+      updates.status === 'cancelado_con_deuda' &&
+      existing.status !== 'cancelado_con_deuda' &&
+      !verifyAdminStepUpToken(
+        submittedStepUpToken,
+        authUser.sub,
+        'cancel_order_fraud',
+        env.JWT_SECRET
+      )
+    ) {
+      return reply.status(403).send({
+        error:
+          'Se requiere autorización de segundo factor (OTP de seguridad del servidor) para cancelar con adeudo.',
+      });
+    }
     for (const [field, folder] of [['deliverySignatureDataUrl', 'signatures'], ['deliveryProofPhotoUrl', 'proofs']]) {
       const url = updates[field];
       if (url === undefined || url === prevPayload[field]) continue;

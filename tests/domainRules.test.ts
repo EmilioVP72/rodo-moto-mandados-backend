@@ -7,6 +7,10 @@ import {
   isRestaurantTicketOrder,
   verifyRiderTicketToken,
 } from '../src/utils/riderTicketToken.ts';
+import {
+  createAdminStepUpToken,
+  verifyAdminStepUpToken,
+} from '../src/utils/adminStepUp.ts';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -264,5 +268,17 @@ describe('Token exclusivo de repartidor y estatus de pedidos de restaurante', ()
     assert.equal(canAdvanceRestaurantTrackingStatus('en_camino', 'en_camino', 'en_cocina'), false);
     assert.equal(canAdvanceRestaurantTrackingStatus('completado', 'entregado', 'completado'), false);
     assert.equal(canAdvanceRestaurantTrackingStatus('recibido', 'cancelado', 'en_cocina'), false);
+  });
+
+  it('valida el token de segundo factor administrativo (Step-Up OTP) en el servidor', () => {
+    const secret = 'test_step_up_secret_key_2026_32_chars_min';
+    const now = 1_700_000_000_000;
+    const token = createAdminStepUpToken('admin-1', 'cancel_order_fraud', secret, 300_000, now);
+
+    assert.equal(verifyAdminStepUpToken(token, 'admin-1', 'cancel_order_fraud', secret, now + 10_000), true);
+    assert.equal(verifyAdminStepUpToken(token, 'otro-admin', 'cancel_order_fraud', secret, now + 10_000), false);
+    assert.equal(verifyAdminStepUpToken(token, 'admin-1', 'block_customer', secret, now + 10_000), false);
+    assert.equal(verifyAdminStepUpToken(token, 'admin-1', 'cancel_order_fraud', secret, now + 301_000), false);
+    assert.equal(verifyAdminStepUpToken('token-falso.firma', 'admin-1', 'cancel_order_fraud', secret, now), false);
   });
 });

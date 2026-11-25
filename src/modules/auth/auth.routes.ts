@@ -16,6 +16,12 @@ import {
   generateSecureRefreshToken,
   extractUserFromRequest,
 } from '../../middlewares/auth.js';
+import crypto from 'node:crypto';
+import { getCache, setCache, invalidateCache } from '../../infra/redis.js';
+import {
+  createAdminStepUpToken,
+  isAdminStepUpAction,
+} from '../../utils/adminStepUp.js';
 import { emitAdminEvent } from '../../infra/socket.js';
 import { verifyIneDigitsServer, getServerCustomerCashLimit } from '../../utils/domainRules.js';
 import {
@@ -27,6 +33,46 @@ import {
 } from '../../utils/ineCrypto.js';
 
 const BCRYPT_ROUNDS = 12;
+const LOGIN_LOCKOUT_MAX_ATTEMPTS = 6;
+const LOGIN_LOCKOUT_WINDOW_SEC = 15 * 60;
+
+// Respaldo en memoria para bloqueos de fuerza bruta y retos OTP cuando Redis no está activo
+const fallbackLoginAttempts = new Map<string, { count: number; expiresAt: number }>();
+const fallbackAdminOtpChallenges = new Map<
+  string,
+  { codeHash: string; actionType: string; adminUserId: string; attempts: number; expiresAt: number }
+>();
+
+async function getFailedLoginCount(identifierKey: string): Promise<number> {
+  const redisKey = `rodo:sec:loginfail:${identifierKey}`;
+  const fromRedis = await getCache<{ count: number }>(redisKey);
+  if (fromRedis && typeof fromRedis.count === 'number') {
+    return fromRedis.count;
+  }
+  const mem = fallbackLoginAttempts.get(identifierKey);
+  if (!mem) return 0;
+  if (Date.now() > mem.expiresAt) {
+    fallbackLoginAttempts.delete(identifierKey);
+    return 0;
+  }
+  return mem.count;
+}
+
+async function recordFailedLoginAttempt(identifierKey: string): Promise<number> {
+  const nextCount = (await getFailedLoginCount(identifierKey)) + 1;
+  const redisKey = `rodo:sec:loginfail:${identifierKey}`;
+  await setCache(redisKey, { count: nextCount }, LOGIN_LOCKOUT_WINDOW_SEC);
+  fallbackLoginAttempts.set(identifierKey, {
+    count: nextCount,
+    expiresAt: Date.now() + LOGIN_LOCKOUT_WINDOW_SEC * 1000,
+  });
+  return nextCount;
+}
+
+async function clearFailedLoginAttempts(identifierKey: string): Promise<void> {
+  fallbackLoginAttempts.delete(identifierKey);
+  await invalidateCache(`rodo:sec:loginfail:${identifierKey}`);
+}
 
 function serializeRecoveryRequest(rec: any) {
   return {
@@ -95,7 +141,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       name: z.string().trim().min(2, 'Ingresa tu nombre completo.'),
       phone: z.string().trim().min(8, 'Ingresa un teléfono celular válido (10 dígitos).'),
       email: z.string().trim().email('Ingresa un correo electrónico válido.'),
-      password: z.string().min(6, 'La contraseña debe tener al menos 6 caracteres.'),
+      password: z.string().min(8, 'La contraseña debe tener al menos 8 caracteres.'),
       ine10Digits: z.string().min(10, 'Ingresa los 10 dígitos del reverso de tu INE.'),
       referralCodeInput: z.string().optional(),
     });
@@ -262,99 +308,114 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // =========================================================================
-  // 2. INICIO DE SESIÓN CON CREDENCIALES REALES (BCRYPT + REFRESH SESSION)
+  // 2. INICIO DE SESIÓN CON CREDENCIALES REALES (BCRYPT + BLOQUEO FUERZA BRUTA)
   // =========================================================================
-  app.post('/api/auth/login', async (request, reply) => {
-    const schema = z.object({
-      email: z.string().trim().min(1),
-      password: z.string().min(1),
-    });
+  app.post(
+    '/api/auth/login',
+    { config: { rateLimit: { max: 15, timeWindow: '15 minutes' } } },
+    async (request, reply) => {
+      const schema = z.object({
+        email: z.string().trim().min(1),
+        password: z.string().min(1),
+      });
 
-    const parsed = schema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({ error: 'Ingresa tu correo y contraseña.' });
-    }
+      const parsed = schema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: 'Ingresa tu correo y contraseña.' });
+      }
 
-    const cleanIdentifier = parsed.data.email.toLowerCase();
-    const cleanPass = parsed.data.password;
+      const cleanIdentifier = parsed.data.email.toLowerCase();
+      const cleanPass = parsed.data.password;
 
-    const isAdminAlias =
-      cleanIdentifier === env.ADMIN_EMAIL.toLowerCase() ||
-      cleanIdentifier === 'admin@rodo.com' ||
-      cleanIdentifier === 'admin';
+      const isAdminAlias =
+        cleanIdentifier === env.ADMIN_EMAIL.toLowerCase() ||
+        cleanIdentifier === 'admin@rodo.com' ||
+        cleanIdentifier === 'admin';
 
-    const lookupEmail = isAdminAlias ? env.ADMIN_EMAIL.toLowerCase() : cleanIdentifier;
-    const phoneDigits = cleanIdentifier.replace(/[^0-9]/g, '');
+      const lookupEmail = isAdminAlias ? env.ADMIN_EMAIL.toLowerCase() : cleanIdentifier;
+      const lockoutKey = lookupEmail;
+      if ((await getFailedLoginCount(lockoutKey)) >= LOGIN_LOCKOUT_MAX_ATTEMPTS) {
+        return reply.status(429).send({
+          error:
+            'Demasiados intentos fallidos en esta cuenta. Por seguridad espera 15 minutos o usa "Recuperar contraseña".',
+        });
+      }
 
-    const user = await prisma.user.findFirst({
-      where: {
-        NOT: { role: 'RIDER', rider: { is: { deletedAt: { not: null } } } },
-        OR: [
-          { email: lookupEmail },
-          ...(phoneDigits.length >= 8 ? [{ phone: phoneDigits }] : []),
-        ],
-      },
-      include: { coupons: true, addresses: true, favorites: true },
-    });
+      const phoneDigits = cleanIdentifier.replace(/[^0-9]/g, '');
 
-    if (!user) {
-      return reply.status(401).send({
-        error: 'Correo o contraseña incorrectos.',
+      const user = await prisma.user.findFirst({
+        where: {
+          NOT: { role: 'RIDER', rider: { is: { deletedAt: { not: null } } } },
+          OR: [
+            { email: lookupEmail },
+            ...(phoneDigits.length >= 8 ? [{ phone: phoneDigits }] : []),
+          ],
+        },
+        include: { coupons: true, addresses: true, favorites: true },
+      });
+
+      if (!user) {
+        await recordFailedLoginAttempt(lockoutKey);
+        return reply.status(401).send({
+          error: 'Correo o contraseña incorrectos.',
+        });
+      }
+
+      // 1) SIEMPRE verificar primero la contraseña con bcrypt antes de informar estado de bloqueo/adeudo
+      const isPasswordValid = await bcrypt.compare(cleanPass, user.passwordHash);
+
+      if (!isPasswordValid) {
+        await recordFailedLoginAttempt(lockoutKey);
+        return reply.status(401).send({
+          error: 'Correo o contraseña incorrectos. Si olvidaste tu contraseña, usa "Recuperar contraseña".',
+        });
+      }
+
+      await clearFailedLoginAttempts(lockoutKey);
+
+      // 2) Solo tras probar la contraseña correcta, informar bloqueo por deuda o fraude sin exponer PII completa
+      if (user.role !== 'ADMIN' && (user.status === 'bloqueado_fraude' || user.pendingDebt > 0)) {
+        return reply.status(403).send({
+          error:
+            user.pendingDebt > 0
+              ? `Acceso bloqueado: Tu cuenta registra un adeudo pendiente de $${user.pendingDebt.toFixed(2)} MXN${
+                  user.debtOrderFolio ? ` (Folio ${user.debtOrderFolio})` : ''
+                }. Liquida el saldo con soporte RODO para reactivar tu servicio.`
+              : 'Acceso bloqueado: Tu cuenta se encuentra suspendida por seguridad. Contacta a soporte RODO.',
+          debtSummary:
+            user.pendingDebt > 0
+              ? {
+                  pendingDebt: user.pendingDebt,
+                  debtOrderFolio: user.debtOrderFolio || null,
+                  debtReason: user.debtReason || null,
+                }
+              : undefined,
+        });
+      }
+
+      const session = await createUserRefreshSession({
+        userId: user.id,
+        userAgent: request.headers['user-agent'],
+        ipAddress: request.ip,
+      });
+
+      const token = signAuthToken({
+        sub: user.id,
+        email: user.email,
+        role: user.role,
+        name: user.name,
+        phone: user.phone,
+        sid: session.sessionId,
+      });
+
+      return reply.send({
+        token,
+        refreshToken: session.refreshToken,
+        isAdmin: user.role === 'ADMIN',
+        user: serializeUserAccount(user),
       });
     }
-
-    // 1) SIEMPRE verificar primero la contraseña con bcrypt antes de informar estado de bloqueo/adeudo
-    //    (Jamás aceptar contraseñas en texto plano de Setting.payload.adminPasscode ni filtrar PII sin autenticar)
-    const isPasswordValid = await bcrypt.compare(cleanPass, user.passwordHash);
-
-    if (!isPasswordValid) {
-      return reply.status(401).send({
-        error: 'Correo o contraseña incorrectos. Si olvidaste tu contraseña, usa "Recuperar contraseña".',
-      });
-    }
-
-    // 2) Solo tras probar la contraseña correcta, informar bloqueo por deuda o fraude sin exponer PII completa
-    if (user.role !== 'ADMIN' && (user.status === 'bloqueado_fraude' || user.pendingDebt > 0)) {
-      return reply.status(403).send({
-        error:
-          user.pendingDebt > 0
-            ? `Acceso bloqueado: Tu cuenta registra un adeudo pendiente de $${user.pendingDebt.toFixed(2)} MXN${
-                user.debtOrderFolio ? ` (Folio ${user.debtOrderFolio})` : ''
-              }. Liquida el saldo con soporte RODO para reactivar tu servicio.`
-            : 'Acceso bloqueado: Tu cuenta se encuentra suspendida por seguridad. Contacta a soporte RODO.',
-        debtSummary:
-          user.pendingDebt > 0
-            ? {
-                pendingDebt: user.pendingDebt,
-                debtOrderFolio: user.debtOrderFolio || null,
-                debtReason: user.debtReason || null,
-              }
-            : undefined,
-      });
-    }
-
-    const session = await createUserRefreshSession({
-      userId: user.id,
-      userAgent: request.headers['user-agent'],
-      ipAddress: request.ip,
-    });
-
-    const token = signAuthToken({
-      sub: user.id,
-      email: user.email,
-      role: user.role,
-      name: user.name,
-      phone: user.phone,
-      sid: session.sessionId,
-    });
-
-    return reply.send({
-      token,
-      refreshToken: session.refreshToken,
-      isAdmin: user.role === 'ADMIN',
-      user: serializeUserAccount(user),
-    });
-  });
+  );
 
   // =========================================================================
   // 3. RENOVACIÓN DE SESIÓN (REFRESH TOKEN ROTATION) Y LOGOUT CON REVOCACIÓN
@@ -511,12 +572,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(recoveryReceipt);
   });
 
-  app.post('/api/auth/reset-password', async (request, reply) => {
-    const schema = z.object({
-      email: z.string().trim().email('Correo inválido.'),
-      code: z.string().trim().regex(/^\d{6}$/, 'El código debe tener exactamente 6 dígitos.'),
-      newPassword: z.string().min(6, 'La nueva contraseña debe tener al menos 6 caracteres.'),
-    });
+  app.post(
+    '/api/auth/reset-password',
+    { config: { rateLimit: { max: 10, timeWindow: '15 minutes' } } },
+    async (request, reply) => {
+      const schema = z.object({
+        email: z.string().trim().email('Correo inválido.'),
+        code: z.string().trim().regex(/^\d{6}$/, 'El código debe tener exactamente 6 dígitos.'),
+        newPassword: z.string().min(8, 'La nueva contraseña debe tener al menos 8 caracteres.'),
+      });
 
     const parsed = schema.safeParse(request.body);
     if (!parsed.success) {
@@ -644,12 +708,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.patch('/api/auth/me', { preHandler: [requireAuth] }, async (request, reply) => {
-    const schema = z.object({
-      name: z.string().trim().min(2).optional(),
-      phone: z.string().trim().min(8).optional(),
-      currentPassword: z.string().optional(),
-      newPassword: z.string().min(6).optional(),
-    });
+      const schema = z.object({
+        name: z.string().trim().min(2).optional(),
+        phone: z.string().trim().min(8).optional(),
+        currentPassword: z.string().optional(),
+        newPassword: z.string().min(8, 'La nueva contraseña debe tener al menos 8 caracteres.').optional(),
+      });
 
     const parsed = schema.safeParse(request.body);
     if (!parsed.success) {
@@ -985,14 +1049,82 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   app.patch('/api/auth/recovery/:id', { preHandler: [requireAdmin] }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as {
-      status: 'aprobada' | 'rechazada';
-      adminNotes?: string;
-    };
+    const parsedBody = z
+      .object({
+        status: z.enum(['aprobada', 'rechazada']),
+        adminNotes: z.string().max(500).optional(),
+      })
+      .safeParse(request.body);
+    if (!parsedBody.success) {
+      return reply.status(400).send({ error: 'Estado de revisión inválido.' });
+    }
+    const body = parsedBody.data;
 
     const existing = await prisma.accountRecoveryRequest.findUnique({ where: { id } });
     if (!existing) {
       return reply.status(404).send({ error: 'Solicitud no encontrada.' });
+    }
+
+    if (body.status === 'aprobada') {
+      const cleanOld = existing.oldEmail.trim().toLowerCase();
+      const cleanNew = existing.newEmail.trim().toLowerCase();
+      const cleanPhone = existing.phone.replace(/[^0-9]/g, '');
+
+      // 1. Buscar exclusivamente cuentas CUSTOMER por coincidencia EXACTA (jamás ADMIN ni RIDER ni contains parcial)
+      const matchedOld = existing.userId
+        ? await prisma.user.findFirst({ where: { id: existing.userId, role: 'CUSTOMER' } })
+        : await prisma.user.findFirst({
+            where: {
+              role: 'CUSTOMER',
+              OR: [
+                ...(cleanOld ? [{ email: cleanOld }] : []),
+                ...(cleanPhone.length >= 10 ? [{ phone: cleanPhone }] : []),
+              ],
+            },
+          });
+
+      // 2. Evitar colisión o robo de correo perteneciente a otra cuenta existente
+      const emailOwner = await prisma.user.findUnique({ where: { email: cleanNew } });
+      if (emailOwner && emailOwner.id !== matchedOld?.id) {
+        return reply.status(409).send({
+          error: 'El nuevo correo solicitado ya pertenece a otra cuenta registrada en el sistema.',
+        });
+      }
+
+      if (matchedOld) {
+        // 3. Si la cuenta tiene INE registrada, verificar coincidencia criptográfica del hash INE antes de transferir el correo
+        if (matchedOld.ine10DigitsHash) {
+          const submittedIne = prepareIneForStorage(decryptIneDigits(existing.ine10Digits));
+          if (!submittedIne || submittedIne.hash !== matchedOld.ine10DigitsHash) {
+            return reply.status(409).send({
+              error:
+                'Bloqueo anti-suplantación: Los 10 dígitos de INE de la solicitud no coinciden con la credencial registrada del titular.',
+            });
+          }
+        }
+
+        const revokeAt = new Date();
+        await prisma.$transaction([
+          prisma.user.update({
+            where: { id: matchedOld.id },
+            data: {
+              email: cleanNew,
+              name: existing.customerName || matchedOld.name,
+              phone: existing.phone || matchedOld.phone,
+              // Preservar bloqueos por adeudo o fraude; no reactivar cuentas deudoras automáticamente
+              status:
+                matchedOld.status === 'bloqueado_fraude' || matchedOld.pendingDebt > 0
+                  ? matchedOld.status
+                  : 'activo',
+            },
+          }),
+          // Revocar todas las sesiones anteriores al cambiar el correo de acceso
+          prisma.refreshSession.updateMany({
+            where: { userId: matchedOld.id, revokedAt: null },
+            data: { revokedAt: revokeAt },
+          }),
+        ]);
+      }
     }
 
     const now = new Date().toISOString();
@@ -1006,37 +1138,123 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       },
     });
 
-    if (body.status === 'aprobada') {
-      const cleanOld = existing.oldEmail.trim().toLowerCase();
-      const cleanNew = existing.newEmail.trim().toLowerCase();
-      const cleanPhone = existing.phone.replace(/[^0-9]/g, '');
-
-      const matchedOld = await prisma.user.findFirst({
-        where: {
-          OR: [
-            ...(cleanOld ? [{ email: cleanOld }] : []),
-            ...(cleanPhone.length >= 8 ? [{ phone: { contains: cleanPhone } }] : []),
-          ],
-        },
-      });
-
-      if (matchedOld) {
-        await prisma.user.update({
-          where: { id: matchedOld.id },
-          data: {
-            email: cleanNew,
-            name: existing.customerName || matchedOld.name,
-            phone: existing.phone || matchedOld.phone,
-            status: 'activo',
-          },
-        });
-      }
-    }
-
     const serializedUpdatedRecovery = serializeRecoveryRequest(updated);
     emitAdminEvent('recovery:updated', serializedUpdatedRecovery);
     return reply.send(serializedUpdatedRecovery);
   });
+
+  // =========================================================================
+  // 7. SEGUNDO FACTOR (STEP-UP OTP) EN SERVIDOR PARA ACCIONES CRÍTICAS ADMIN
+  // =========================================================================
+  app.post(
+    '/api/auth/admin/otp-challenge',
+    { preHandler: [requireAdmin], config: { rateLimit: { max: 15, timeWindow: '15 minutes' } } },
+    async (request, reply) => {
+      const body = (request.body || {}) as { actionType?: unknown };
+      if (!isAdminStepUpAction(body.actionType)) {
+        return reply.status(400).send({ error: 'Tipo de acción de seguridad inválido.' });
+      }
+
+      const challengeId = `sotp-${crypto.randomUUID()}`;
+      const otpCode = generateSixDigitResetCode();
+      const codeHash = hashSecretSha256(otpCode);
+      const ttlSec = 90;
+      const expiresAt = Date.now() + ttlSec * 1000;
+      const record = {
+        codeHash,
+        actionType: body.actionType,
+        adminUserId: request.authUser!.sub,
+        attempts: 0,
+        expiresAt,
+      };
+
+      await setCache(`rodo:sec:sotp:${challengeId}`, record, ttlSec);
+      fallbackAdminOtpChallenges.set(challengeId, record);
+
+      const mail = resetMailTransport();
+      let sentByEmail = false;
+      if (mail && process.env.SMTP_FROM) {
+        try {
+          await mail.sendMail(
+            recoveryMessage(request.authUser!.email, otpCode, process.env.SMTP_FROM)
+          );
+          sentByEmail = true;
+        } catch {
+          sentByEmail = false;
+        }
+      }
+
+      return reply.status(201).send({
+        challengeId,
+        expiresAt,
+        deliveryChannel: sentByEmail ? 'email' : 'panel',
+        // Si no hay servidor SMTP configurado en el entorno, se entrega únicamente a la sesión ADMIN autenticada
+        ...(sentByEmail ? {} : { otpCode }),
+      });
+    }
+  );
+
+  app.post(
+    '/api/auth/admin/otp-verify',
+    { preHandler: [requireAdmin], config: { rateLimit: { max: 15, timeWindow: '15 minutes' } } },
+    async (request, reply) => {
+      const parsed = z
+        .object({
+          challengeId: z.string().min(8).max(100),
+          code: z.string().trim().regex(/^\d{6}$/, 'El código debe tener 6 dígitos.'),
+        })
+        .safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: 'Datos de verificación OTP inválidos.' });
+      }
+
+      const redisKey = `rodo:sec:sotp:${parsed.data.challengeId}`;
+      const record =
+        (await getCache<{
+          codeHash: string;
+          actionType: string;
+          adminUserId: string;
+          attempts: number;
+          expiresAt: number;
+        }>(redisKey)) || fallbackAdminOtpChallenges.get(parsed.data.challengeId);
+
+      if (!record || Date.now() > record.expiresAt) {
+        fallbackAdminOtpChallenges.delete(parsed.data.challengeId);
+        await invalidateCache(redisKey);
+        return reply.status(400).send({ error: 'El desafío OTP expiró (+90 seg). Genera uno nuevo.' });
+      }
+
+      if (record.adminUserId !== request.authUser!.sub || !isAdminStepUpAction(record.actionType)) {
+        return reply.status(403).send({ error: 'Este desafío OTP pertenece a otra sesión.' });
+      }
+
+      if (record.attempts >= 5) {
+        fallbackAdminOtpChallenges.delete(parsed.data.challengeId);
+        await invalidateCache(redisKey);
+        return reply.status(429).send({ error: 'Demasiados intentos incorrectos. Solicita un nuevo código.' });
+      }
+
+      const inputHash = hashSecretSha256(parsed.data.code);
+      if (!timingSafeCompareHex(inputHash, record.codeHash)) {
+        const updatedRecord = { ...record, attempts: record.attempts + 1 };
+        const remainingSec = Math.max(1, Math.ceil((record.expiresAt - Date.now()) / 1000));
+        await setCache(redisKey, updatedRecord, remainingSec);
+        fallbackAdminOtpChallenges.set(parsed.data.challengeId, updatedRecord);
+        return reply.status(400).send({ error: 'Código OTP incorrecto. Verifica los 6 dígitos.' });
+      }
+
+      // Quemar el desafío de un solo uso y emitir stepUpToken firmado en servidor
+      fallbackAdminOtpChallenges.delete(parsed.data.challengeId);
+      await invalidateCache(redisKey);
+
+      const stepUpToken = createAdminStepUpToken(
+        request.authUser!.sub,
+        record.actionType,
+        env.JWT_SECRET
+      );
+      return reply.send({ ok: true, stepUpToken });
+    }
+  );
 
   // LISTA NEGRA CENTRALIZADA (EXCLUSIVO ADMIN)
   app.get('/api/auth/blocked-customers', { preHandler: [requireAdmin] }, async (_request, reply) => {
@@ -1159,5 +1377,5 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 }
 
 function cryptoRandomFallback(): string {
-  return `rodo-internal-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `rodo-internal-${crypto.randomBytes(24).toString('hex')}`;
 }
