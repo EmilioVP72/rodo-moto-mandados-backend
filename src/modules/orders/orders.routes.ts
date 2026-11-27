@@ -27,6 +27,7 @@ import {
 
 import { quoteExpressDelivery } from '../routing/routing.routes.js';
 import { initialOrderPayment, money, priceFoodOrder, priceFuelRequest, matchesDisplayedQuote, PriceError } from '../../utils/orderPricing.js';
+import { getRestaurantUnavailableReason } from '../../utils/restaurantAvailability.js';
 
 const CUSTOMER_ALLOWED_PATCH_FIELDS = new Set([
   'receptionConfirmed',
@@ -429,7 +430,9 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
     body.quoteConfirmedByCustomer = false;
     try {
       if (isStandardFoodOrder) {
-        if (!restaurantDoc?.isActive || !restaurantDoc.isOpen) throw new PriceError('El restaurante no está disponible.');
+        if (!restaurantDoc?.isActive || !restaurantDoc.isOpen) throw new PriceError('El restaurante no está disponible para recibir pedidos en este momento.');
+        const unavailableReason = getRestaurantUnavailableReason(menu);
+        if (unavailableReason) throw new PriceError(unavailableReason);
         const surcharge = body.deliveryType === 'express' ? money(settings.expressDeliverySurcharge ?? 25) : 0;
         const price = priceFoodOrder(body, { menu: menu.menu || [], suggestedExtras: menu.suggestedExtras,
           deliveryFee: restaurantDoc.deliveryFee + surcharge, commissionRate: restaurantDoc.commissionRate,
@@ -454,6 +457,14 @@ export async function ordersRoutes(app: FastifyInstance): Promise<void> {
         total = subtotal = commissionAmount = money(count * deliveryFee);
         items = [{ id: 'item-riders', name: 'Servicio de reparto', quantity: count, price: deliveryFee }];
       } else if (quoted) {
+        if (kind === 'pedido_personalizado' && !restaurantDoc) {
+          throw new PriceError('Selecciona un restaurante válido antes de enviar el pedido.');
+        }
+        if (kind === 'pedido_personalizado' && restaurantDoc) {
+          if (!restaurantDoc.isActive || !restaurantDoc.isOpen) throw new PriceError('El restaurante no está disponible para recibir pedidos en este momento.');
+          const unavailableReason = getRestaurantUnavailableReason(menu);
+          if (unavailableReason) throw new PriceError(unavailableReason);
+        }
         deliveryFee = kind === 'auxilio_gasolina' ? 0 : restaurantDoc?.deliveryFee ?? 35;
         if (kind === 'auxilio_gasolina') {
           const { liters, fuelType } = body.fuelDetails || {};
