@@ -21,7 +21,7 @@ export const envSchema = z
       (val) => (typeof val === 'string' && val.trim() === '' ? undefined : val),
       z.string().min(16).optional()
     ),
-    JWT_EXPIRES_IN: z.string().default('30d'),
+    JWT_EXPIRES_IN: z.string().default('30m'),
     ADMIN_EMAIL: z.string().default('edsoncruz14999@gmail.com'),
     ADMIN_INITIAL_PASSWORD: z.string().default(INSECURE_DEFAULT_ADMIN_PASS),
     CORS_ORIGIN: z.string().default('*'),

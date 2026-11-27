@@ -22,6 +22,13 @@ import {
   createAdminStepUpToken,
   isAdminStepUpAction,
 } from '../../utils/adminStepUp.js';
+import {
+  REFRESH_COOKIE_NAME,
+  parseCookieValue,
+  isSecureCookieRequest,
+  buildRefreshTokenCookieHeader,
+  buildClearRefreshTokenCookieHeader,
+} from '../../utils/refreshCookie.js';
 import { emitAdminEvent } from '../../infra/socket.js';
 import { verifyIneDigitsServer, getServerCustomerCashLimit } from '../../utils/domainRules.js';
 import {
@@ -35,6 +42,14 @@ import {
 const BCRYPT_ROUNDS = 12;
 const LOGIN_LOCKOUT_MAX_ATTEMPTS = 6;
 const LOGIN_LOCKOUT_WINDOW_SEC = 15 * 60;
+
+function isRequestHttps(request: { protocol?: string; headers: Record<string, unknown> }): boolean {
+  return isSecureCookieRequest(
+    request.protocol,
+    request.headers['x-forwarded-proto'] as string | string[] | undefined,
+    process.env.FORCE_SECURE_COOKIES === 'true'
+  );
+}
 
 // Respaldo en memoria para bloqueos de fuerza bruta y retos OTP cuando Redis no está activo
 const fallbackLoginAttempts = new Map<string, { count: number; expiresAt: number }>();
@@ -299,6 +314,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const serialized = serializeUserAccount(createdUser);
     emitAdminEvent('accounts:updated', serialized);
 
+    reply.header('Set-Cookie', buildRefreshTokenCookieHeader(session.refreshToken, isRequestHttps(request)));
+
     return reply.status(201).send({
       token,
       refreshToken: session.refreshToken,
@@ -408,6 +425,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         sid: session.sessionId,
       });
 
+      reply.header('Set-Cookie', buildRefreshTokenCookieHeader(session.refreshToken, isRequestHttps(request)));
+
       return reply.send({
         token,
         refreshToken: session.refreshToken,
@@ -421,13 +440,18 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   // 3. RENOVACIÓN DE SESIÓN (REFRESH TOKEN ROTATION) Y LOGOUT CON REVOCACIÓN
   // =========================================================================
   app.post('/api/auth/refresh', async (request, reply) => {
-    const schema = z.object({ refreshToken: z.string().min(20) });
-    const parsed = schema.safeParse(request.body);
-    if (!parsed.success) {
+    const bodyObj = (request.body && typeof request.body === 'object' ? request.body : {}) as {
+      refreshToken?: unknown;
+    };
+    const bodyRefreshToken = typeof bodyObj.refreshToken === 'string' ? bodyObj.refreshToken.trim() : '';
+    const cookieRefreshToken = parseCookieValue(request.headers.cookie, REFRESH_COOKIE_NAME) || '';
+    const rawRefreshToken = bodyRefreshToken || cookieRefreshToken;
+
+    if (!rawRefreshToken || rawRefreshToken.length < 20) {
       return reply.status(400).send({ error: 'Refresh token inválido.' });
     }
 
-    const incomingHash = hashSecretSha256(parsed.data.refreshToken);
+    const incomingHash = hashSecretSha256(rawRefreshToken);
     const existingSession = await prisma.refreshSession.findUnique({
       where: { tokenHash: incomingHash },
       include: {
@@ -443,6 +467,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       existingSession.revokedAt !== null ||
       existingSession.expiresAt < new Date()
     ) {
+      reply.header('Set-Cookie', buildClearRefreshTokenCookieHeader(isRequestHttps(request)));
       return reply.status(401).send({ error: 'Sesión expirada o revocada. Inicia sesión nuevamente.' });
     }
 
@@ -450,6 +475,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       existingSession.user.role !== 'ADMIN' &&
       (existingSession.user.status === 'bloqueado_fraude' || existingSession.user.pendingDebt > 0)
     ) {
+      reply.header('Set-Cookie', buildClearRefreshTokenCookieHeader(isRequestHttps(request)));
       return reply.status(403).send({ error: 'Tu cuenta se encuentra bloqueada.' });
     }
 
@@ -474,6 +500,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       sid: nextSession.sessionId,
     });
 
+    reply.header('Set-Cookie', buildRefreshTokenCookieHeader(nextSession.refreshToken, isRequestHttps(request)));
+
     return reply.send({
       token,
       refreshToken: nextSession.refreshToken,
@@ -485,7 +513,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/auth/logout', async (request, reply) => {
     const body = (request.body || {}) as { refreshToken?: string; allDevices?: boolean };
     const authUser = extractUserFromRequest(request);
+    const cookieRefreshToken = parseCookieValue(request.headers.cookie, REFRESH_COOKIE_NAME) || '';
+    const rawRefreshToken = body.refreshToken || cookieRefreshToken;
     const now = new Date();
+
+    reply.header('Set-Cookie', buildClearRefreshTokenCookieHeader(isRequestHttps(request)));
 
     if (body.allDevices && authUser) {
       await prisma.refreshSession.updateMany({
@@ -504,8 +536,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         .catch(() => {});
     }
 
-    if (body.refreshToken) {
-      const tokenHash = hashSecretSha256(body.refreshToken);
+    if (rawRefreshToken) {
+      const tokenHash = hashSecretSha256(rawRefreshToken);
       await prisma.refreshSession
         .updateMany({
           where: { tokenHash, revokedAt: null },
@@ -663,6 +695,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       phone: updatedUser.phone,
       sid: freshSession.sessionId,
     });
+
+    reply.header('Set-Cookie', buildRefreshTokenCookieHeader(freshSession.refreshToken, isRequestHttps(request)));
 
     return reply.send({
       ok: true,
