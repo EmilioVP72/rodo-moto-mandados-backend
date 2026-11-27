@@ -11,6 +11,19 @@ import {
   createAdminStepUpToken,
   verifyAdminStepUpToken,
 } from '../src/utils/adminStepUp.ts';
+import {
+  REFRESH_COOKIE_NAME,
+  parseCookieValue,
+  isSecureCookieRequest,
+  buildRefreshTokenCookieHeader,
+  buildClearRefreshTokenCookieHeader,
+} from '../src/utils/refreshCookie.ts';
+import {
+  isSafeHttpOrUploadUrl,
+  validateDispatchSettingsPayload,
+  validateRestaurantPayload,
+  validatePartnerLocalPayload,
+} from '../src/utils/inputSanitizer.ts';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -280,5 +293,73 @@ describe('Token exclusivo de repartidor y estatus de pedidos de restaurante', ()
     assert.equal(verifyAdminStepUpToken(token, 'admin-1', 'block_customer', secret, now + 10_000), false);
     assert.equal(verifyAdminStepUpToken(token, 'admin-1', 'cancel_order_fraud', secret, now + 301_000), false);
     assert.equal(verifyAdminStepUpToken('token-falso.firma', 'admin-1', 'cancel_order_fraud', secret, now), false);
+  });
+
+  it('construye y lee cookies HttpOnly SameSite=Strict para rotación de Refresh Token', () => {
+    const headerHttps = buildRefreshTokenCookieHeader('rt_secreto_1234567890123456', true);
+    assert.ok(headerHttps.includes(`${REFRESH_COOKIE_NAME}=rt_secreto_1234567890123456`));
+    assert.ok(headerHttps.includes('HttpOnly'));
+    assert.ok(headerHttps.includes('SameSite=Strict'));
+    assert.ok(headerHttps.includes('Path=/api/auth'));
+    assert.ok(headerHttps.includes('Secure'));
+
+    const headerHttp = buildRefreshTokenCookieHeader('rt_dev_1234567890123456', false);
+    assert.ok(!headerHttp.includes('Secure'));
+    assert.equal(
+      parseCookieValue(`foo=1; ${REFRESH_COOKIE_NAME}=rt_dev_1234567890123456; bar=2`, REFRESH_COOKIE_NAME),
+      'rt_dev_1234567890123456'
+    );
+    assert.ok(buildClearRefreshTokenCookieHeader(true).includes('Max-Age=0'));
+    assert.equal(isSecureCookieRequest('http', 'https, http'), true);
+    assert.equal(isSecureCookieRequest('http', undefined), false);
+  });
+
+  it('bloquea esquemas peligrosos (javascript:, data:text/html) y valida esquemas Zod en settings y catálogo', () => {
+    assert.equal(isSafeHttpOrUploadUrl('https://maps.google.com/?q=20.91,-100.74'), true);
+    assert.equal(isSafeHttpOrUploadUrl('/uploads/restaurants/foto.webp'), true);
+    assert.equal(isSafeHttpOrUploadUrl('/assets/logo.png'), true);
+    assert.equal(isSafeHttpOrUploadUrl(''), true);
+    assert.equal(isSafeHttpOrUploadUrl('javascript:alert(document.cookie)'), false);
+    assert.equal(isSafeHttpOrUploadUrl('data:text/html;base64,PHNjcmlwdD4='), false);
+    assert.equal(isSafeHttpOrUploadUrl('data:image/svg+xml;base64,PHN2Zz4='), false);
+    assert.equal(isSafeHttpOrUploadUrl('/uploads/../etc/passwd'), false);
+    assert.equal(isSafeHttpOrUploadUrl('//evil.example/payload.js'), false);
+
+    const okSettings = validateDispatchSettingsPayload({
+      rainPauseEnabled: true,
+      baseDeliveryTariff: 40,
+      adminPasscode: 'intento_inyeccion',
+      campoDesconocido: 'se_descarta',
+    });
+    assert.equal(okSettings.success, true);
+    if (okSettings.success) {
+      assert.equal(okSettings.data.rainPauseEnabled, true);
+      assert.equal(okSettings.data.adminPasscode, undefined);
+      assert.equal(okSettings.data.campoDesconocido, undefined);
+    }
+
+    const badSettings = validateDispatchSettingsPayload({ baseDeliveryTariff: -50 });
+    assert.equal(badSettings.success, false);
+
+    const badRestaurant = validateRestaurantPayload({
+      name: 'Local Prueba',
+      mapsUrl: 'javascript:alert(1)',
+    });
+    assert.equal(badRestaurant.success, false);
+
+    const okRestaurant = validateRestaurantPayload({
+      name: 'Tacos Centro',
+      establishmentType: 'restaurante',
+      category: 'Tacos',
+      deliveryFee: 35,
+      commissionRate: 15,
+      mapsUrl: 'https://maps.app.goo.gl/ejemplo',
+      image: '/uploads/restaurants/tacos.jpg',
+      menu: [{ id: 'm1', name: 'Orden Pastor', description: '5 tacos', price: 85 }],
+    });
+    assert.equal(okRestaurant.success, true);
+
+    const badLocal = validatePartnerLocalPayload({ name: 'Local X', code: 'abc' });
+    assert.equal(badLocal.success, false);
   });
 });

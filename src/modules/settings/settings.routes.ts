@@ -3,14 +3,15 @@ import { prisma } from '../../infra/prisma.js';
 import { getCache, setCache, invalidateCache } from '../../infra/redis.js';
 import { broadcastEvent } from '../../infra/socket.js';
 import { requireAdmin, extractUserFromRequest } from '../../middlewares/auth.js';
+import {
+  stripDangerousKeysDeep,
+  validateDispatchSettingsPayload,
+} from '../../utils/inputSanitizer.js';
 
 const SETTINGS_CACHE_KEY = 'rodo:settings:general';
 
 function sanitizeSettingsForPublic(payload: Record<string, unknown>, _isAdmin: boolean) {
-  const copy = { ...payload };
-  delete copy.ridersList;
-  delete copy.adminPasscode;
-  return copy;
+  return stripDangerousKeysDeep({ ...payload });
 }
 
 export async function settingsRoutes(app: FastifyInstance): Promise<void> {
@@ -30,20 +31,18 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.put('/api/settings', { preHandler: [requireAdmin] }, async (request, reply) => {
-    const body = request.body as Record<string, unknown>;
-    if (!body || typeof body !== 'object') {
-      return reply.status(400).send({ error: 'Configuración inválida.' });
+    const validated = validateDispatchSettingsPayload(request.body);
+    if (!validated.success) {
+      return reply.status(400).send({ error: validated.error });
     }
 
-    delete body.ridersList;
-    delete body.adminPasscode;
     const existing = await prisma.setting.findUnique({ where: { id: 'general' } });
-    const prevPayload = { ...((existing?.payload as Record<string, unknown>) || {}) };
-    delete prevPayload.adminPasscode;
-    delete prevPayload.ridersList;
+    const prevPayload = stripDangerousKeysDeep(
+      { ...((existing?.payload as Record<string, unknown>) || {}) }
+    );
     const merged = {
       ...prevPayload,
-      ...body,
+      ...validated.data,
     };
 
     await prisma.setting.upsert({
@@ -53,7 +52,7 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     });
 
     await invalidateCache(SETTINGS_CACHE_KEY);
-    // Nunca emitir adminPasscode por Socket.IO público
+    // Nunca emitir adminPasscode ni claves prohibidas por Socket.IO público
     broadcastEvent('settings:updated', sanitizeSettingsForPublic(merged, false));
     return reply.send(sanitizeSettingsForPublic(merged, true));
   });

@@ -4,6 +4,10 @@ import { prisma } from '../../infra/prisma.js';
 import { getCache, setCache, invalidateCache } from '../../infra/redis.js';
 import { broadcastEvent, emitAdminEvent } from '../../infra/socket.js';
 import { extractUserFromRequest, requireAdmin } from '../../middlewares/auth.js';
+import {
+  validatePartnerLocalPayload,
+  validateRestaurantPayload,
+} from '../../utils/inputSanitizer.js';
 
 const RESTAURANTS_CACHE_KEY = 'rodo:catalog:restaurants';
 const PARTNER_LOCALS_CACHE_KEY = 'rodo:catalog:partner_locals';
@@ -91,10 +95,11 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
 
   app.put('/api/restaurants/:id', { preHandler: [requireAdmin] }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as any;
-    if (!body || !body.name) {
-      return reply.status(400).send({ error: 'Datos del restaurante incompletos.' });
+    const validated = validateRestaurantPayload(request.body);
+    if (!validated.success) {
+      return reply.status(400).send({ error: validated.error });
     }
+    const body = validated.data;
 
     const usedCodes = await collectUsedServerLocalCodes(id);
     const requestedCode = normalizePinCode(body.localCode);
@@ -123,25 +128,25 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       await tx.restaurant.upsert({
         where: { id },
         update: {
-          name: String(body.name),
-          establishmentType: String(body.establishmentType || 'restaurante'),
-          category: String(body.category || 'General'),
-          deliveryFee: Number(body.deliveryFee ?? 35),
-          commissionRate: Number(body.commissionRate ?? 15),
-          isActive: Boolean(body.isActive ?? true),
-          isOpen: Boolean(body.isOpen ?? true),
-          payload: restaurantPayload,
+          name: body.name,
+          establishmentType: body.establishmentType,
+          category: body.category,
+          deliveryFee: body.deliveryFee,
+          commissionRate: body.commissionRate,
+          isActive: body.isActive,
+          isOpen: body.isOpen,
+          payload: restaurantPayload as any,
         },
         create: {
           id,
-          name: String(body.name),
-          establishmentType: String(body.establishmentType || 'restaurante'),
-          category: String(body.category || 'General'),
-          deliveryFee: Number(body.deliveryFee ?? 35),
-          commissionRate: Number(body.commissionRate ?? 15),
-          isActive: Boolean(body.isActive ?? true),
-          isOpen: Boolean(body.isOpen ?? true),
-          payload: restaurantPayload,
+          name: body.name,
+          establishmentType: body.establishmentType,
+          category: body.category,
+          deliveryFee: body.deliveryFee,
+          commissionRate: body.commissionRate,
+          isActive: body.isActive,
+          isOpen: body.isOpen,
+          payload: restaurantPayload as any,
         },
       });
 
@@ -150,36 +155,36 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         where: { id: linkedPartnerId },
         update: {
           code: assignedCode,
-          name: String(body.name),
+          name: body.name,
           phone: String(body.phone || '4151019920'),
-          serviceFee: Number(body.deliveryFee ?? 35),
-          address: body.address || {
+          serviceFee: body.deliveryFee,
+          address: (body.address || {
             calle: 'Centro',
             numero: 'S/N',
             colonia: 'Centro',
             lat: body.coordinates?.lat || 20.9144,
             lng: body.coordinates?.lng || -100.7437,
-          },
+          }) as any,
           contactPerson: body.contactPerson || null,
           notes: body.description || null,
-          isActive: Boolean(body.isActive ?? true),
+          isActive: body.isActive,
         },
         create: {
           id: linkedPartnerId,
           code: assignedCode,
-          name: String(body.name),
+          name: body.name,
           phone: String(body.phone || '4151019920'),
-          serviceFee: Number(body.deliveryFee ?? 35),
-          address: body.address || {
+          serviceFee: body.deliveryFee,
+          address: (body.address || {
             calle: 'Centro',
             numero: 'S/N',
             colonia: 'Centro',
             lat: body.coordinates?.lat || 20.9144,
             lng: body.coordinates?.lng || -100.7437,
-          },
+          }) as any,
           contactPerson: body.contactPerson || null,
           notes: body.description || null,
-          isActive: Boolean(body.isActive ?? true),
+          isActive: body.isActive,
         },
       });
     });
@@ -264,12 +269,12 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
 
   app.put('/api/partner-locals/:id', { preHandler: [requireAdmin] }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as any;
-    if (!body || !body.name || !body.code) {
-      return reply.status(400).send({ error: 'Nombre y código de 3 dígitos son obligatorios.' });
+    const validated = validatePartnerLocalPayload(request.body);
+    if (!validated.success) {
+      return reply.status(400).send({ error: validated.error });
     }
-
-    const cleanCode = String(body.code).trim();
+    const body = validated.data;
+    const cleanCode = body.code;
 
     // Si otro local tenía ese código, liberarlo primero
     await prisma.partnerLocal.updateMany({
@@ -286,24 +291,24 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       where: { id },
       update: {
         code: cleanCode,
-        name: String(body.name),
-        phone: String(body.phone || ''),
-        serviceFee: Number(body.serviceFee ?? 35),
-        address: body.address || {},
+        name: body.name,
+        phone: body.phone,
+        serviceFee: body.serviceFee,
+        address: body.address as any,
         contactPerson: body.contactPerson || null,
         notes: body.notes || null,
-        isActive: Boolean(body.isActive ?? true),
+        isActive: body.isActive,
       },
       create: {
         id,
         code: cleanCode,
-        name: String(body.name),
-        phone: String(body.phone || ''),
-        serviceFee: Number(body.serviceFee ?? 35),
-        address: body.address || {},
+        name: body.name,
+        phone: body.phone,
+        serviceFee: body.serviceFee,
+        address: body.address as any,
         contactPerson: body.contactPerson || null,
         notes: body.notes || null,
-        isActive: Boolean(body.isActive ?? true),
+        isActive: body.isActive,
       },
     });
 

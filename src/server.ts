@@ -19,6 +19,10 @@ import { notificationsRoutes } from './modules/notifications/notifications.route
 import { routingRoutes } from './modules/routing/routing.routes.js';
 import { uploadsRoutes } from './modules/uploads/uploads.routes.js';
 import { ridersRoutes } from './modules/riders/riders.routes.js';
+import {
+  validateDispatchSettingsPayload,
+  validateRestaurantPayload,
+} from './utils/inputSanitizer.js';
 
 async function bootstrap() {
   const app = Fastify({
@@ -41,7 +45,15 @@ async function bootstrap() {
 
   await app.register(helmet, {
     crossOriginResourcePolicy: { policy: 'cross-origin' },
-    contentSecurityPolicy: false,
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'none'"],
+        imgSrc: ["'self'", 'data:', 'blob:'],
+        frameAncestors: ["'self'"],
+        baseUri: ["'none'"],
+        formAction: ["'none'"],
+      },
+    },
   });
 
   await app.register(rateLimit, {
@@ -91,19 +103,22 @@ async function bootstrap() {
     if (!existingSettings && currentRestCount === 0 && Array.isArray(body?.restaurants) && body.restaurants.length > 0) {
       for (const r of body.restaurants) {
         if (!r?.id || !r?.name) continue;
+        const validatedRest = validateRestaurantPayload(r);
+        if (!validatedRest.success) continue;
+        const cleanR = { ...validatedRest.data, id: String(r.id) };
         await prisma.restaurant.upsert({
           where: { id: String(r.id) },
           update: {},
           create: {
             id: String(r.id),
-            name: String(r.name),
-            establishmentType: String(r.establishmentType || 'restaurante'),
-            category: String(r.category || 'General'),
-            deliveryFee: Number(r.deliveryFee ?? 35),
-            commissionRate: Number(r.commissionRate ?? 15),
-            isActive: Boolean(r.isActive ?? true),
-            isOpen: Boolean(r.isOpen ?? true),
-            payload: r,
+            name: cleanR.name,
+            establishmentType: cleanR.establishmentType,
+            category: cleanR.category,
+            deliveryFee: cleanR.deliveryFee,
+            commissionRate: cleanR.commissionRate,
+            isActive: cleanR.isActive,
+            isOpen: cleanR.isOpen,
+            payload: cleanR as any,
           },
         });
         seededRestaurants++;
@@ -112,16 +127,16 @@ async function bootstrap() {
     }
 
     if (!existingSettings && body?.settings && typeof body.settings === 'object') {
-      const safeSettings = { ...body.settings };
-      delete safeSettings.adminPasscode;
-      delete safeSettings.ridersList;
-      await prisma.setting.create({
-        data: {
-          id: 'general',
-          payload: safeSettings as any,
-        },
-      });
-      await invalidateCache('rodo:settings:general');
+      const validatedSettings = validateDispatchSettingsPayload(body.settings);
+      if (validatedSettings.success) {
+        await prisma.setting.create({
+          data: {
+            id: 'general',
+            payload: validatedSettings.data as any,
+          },
+        });
+        await invalidateCache('rodo:settings:general');
+      }
     }
 
     return reply.send({
