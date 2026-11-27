@@ -24,12 +24,15 @@ ENV NODE_ENV=production
 ENV PORT=4000
 ENV HOST=0.0.0.0
 
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /app/dist ./dist
+COPY --from=builder --chown=node:node /app/package.json ./
+COPY --from=builder --chown=node:node /app/node_modules ./node_modules
+COPY --from=builder --chown=node:node /app/prisma ./prisma
+COPY --from=builder --chown=node:node /app/dist ./dist
 
-RUN mkdir -p /app/uploads
+RUN mkdir -p /app/uploads/restaurants /app/uploads/private && chown -R node:node /app
+
+# Ejecutar proceso de aplicación sin privilegios de root
+USER node
 
 EXPOSE 4000
 

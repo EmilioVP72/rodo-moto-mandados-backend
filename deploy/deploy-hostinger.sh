@@ -110,6 +110,7 @@ if [ ! -f ".env" ]; then
   PG_PASS="$(openssl rand -hex 24)"
   JWT_KEY="$(openssl rand -hex 32)"
   INE_KEY="$(openssl rand -hex 32)"
+  BACKUP_KEY="$(openssl rand -hex 32)"
 
   cat > .env <<EOF
 WEB_PORT=${USER_WEB_PORT}
@@ -129,6 +130,7 @@ ADMIN_EMAIL=${USER_ADMIN_EMAIL}
 ADMIN_INITIAL_PASSWORD=${USER_ADMIN_PASS}
 CORS_ORIGIN=${CORS_VALUE}
 BACKUP_KEEP_DAYS=14
+BACKUP_ENCRYPTION_KEY=${BACKUP_KEY}
 EOF
   chmod 600 .env
   echo "    -> Archivo .env generado y protegido (permisos 600)."
@@ -150,6 +152,9 @@ else
   fi
   if ! grep -q '^INE_ENCRYPTION_KEY=' .env; then
     echo "INE_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env
+  fi
+  if ! grep -q '^BACKUP_ENCRYPTION_KEY=' .env; then
+    echo "BACKUP_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env
   fi
 fi
 
@@ -187,7 +192,11 @@ docker exec "$PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U "$PG_SUPERUSER" -d "${POS
 # 6. Compilar y desplegar stack de produccion (sin tocar 80/443 ni duplicar Postgres)
 echo "[6/6] Compilando e iniciando contenedores de produccion (rodo-redis, rodo-api, rodo-web, rodo-backup)..."
 mkdir -p backups/postgres
-docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
+chmod 700 backups/postgres
+docker compose -f docker-compose.prod.yml build
+docker compose -f docker-compose.prod.yml run --rm --no-deps -u 0 --entrypoint sh rodo-api \
+  -c "mkdir -p /app/uploads/restaurants /app/uploads/private && chown -R node:node /app/uploads" || true
+docker compose -f docker-compose.prod.yml up -d --remove-orphans
 
 echo ""
 echo "========================================================================"

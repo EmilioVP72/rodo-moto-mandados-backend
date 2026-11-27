@@ -6,6 +6,8 @@
         X-Content-Type-Options "nosniff"
         X-Frame-Options "SAMEORIGIN"
         Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "geolocation=(self), camera=(self), microphone=()"
+        ?Content-Security-Policy "default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; media-src 'self' data: blob:; connect-src 'self' ws: wss: https://nominatim.openstreetmap.org https://router.project-osrm.org https://*.tile.openstreetmap.org https://server.arcgisonline.com; frame-ancestors 'self'; base-uri 'self'; object-src 'none'; form-action 'self'"
         -Server
     }
 
