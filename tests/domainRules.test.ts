@@ -361,6 +361,44 @@ describe('Token exclusivo de repartidor y estatus de pedidos de restaurante', ()
 
     const badLocal = validatePartnerLocalPayload({ name: 'Local X', code: 'abc' });
     assert.equal(badLocal.success, false);
+
+    // Fotos Base64 grandes (> 4 KB, ej. subidas desde dispositivo en AdminPanel), campos nulos y especificaciones sin límite
+    const largeBase64Photo = 'data:image/jpeg;base64,' + 'A'.repeat(60_000);
+    const restWithSpecsAndBase64 = validateRestaurantPayload({
+      id: 'rest-3lx8ez',
+      name: 'Alitas y Comida China Express',
+      establishmentType: 'restaurante',
+      category: 'Alitas',
+      deliveryFee: 35,
+      commissionRate: 15,
+      image: largeBase64Photo,
+      mapsUrl: 'maps.app.goo.gl/ejemploRuta',
+      closureReason: null,
+      bankDetails: null,
+      customServiceHours: { open: '09:00:00', close: '21:00:00', enabled: false },
+      workingDays: [],
+      menu: [
+        {
+          id: 'item-alitas',
+          name: 'Alitas Grandes',
+          description: null,
+          price: 165,
+          image: largeBase64Photo,
+          optionGroups: [
+            {
+              id: 'grp-salsas',
+              name: 'Salsas a elegir',
+              required: true,
+              hasLimit: false,
+              minSelect: 1,
+              maxSelect: 0,
+              options: ['BBQ', 'Buffalo', 'Mango Habanero'],
+            },
+          ],
+        },
+      ],
+    });
+    assert.equal(restWithSpecsAndBase64.success, true);
   });
 
   it('valida especificaciones de platillos (optionGroups con o sin límite) en priceFoodOrder', () => {

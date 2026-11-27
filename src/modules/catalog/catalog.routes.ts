@@ -4,6 +4,7 @@ import { prisma } from '../../infra/prisma.js';
 import { getCache, setCache, invalidateCache } from '../../infra/redis.js';
 import { broadcastEvent, emitAdminEvent } from '../../infra/socket.js';
 import { extractUserFromRequest, requireAdmin } from '../../middlewares/auth.js';
+import { saveImage } from '../uploads/storage.js';
 import {
   validatePartnerLocalPayload,
   validateRestaurantPayload,
@@ -100,6 +101,20 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: validated.error });
     }
     const body = validated.data;
+
+    // Convertir imágenes Base64 embebidas en archivos persistentes bajo /uploads/restaurants/
+    if (typeof body.image === 'string' && body.image.startsWith('data:image/')) {
+      const storedCover = await saveImage('restaurants', body.image).catch(() => null);
+      if (storedCover?.url) body.image = storedCover.url;
+    }
+    if (Array.isArray(body.menu)) {
+      for (const dish of body.menu) {
+        if (typeof dish.image === 'string' && dish.image.startsWith('data:image/')) {
+          const storedDishImg = await saveImage('restaurants', dish.image).catch(() => null);
+          if (storedDishImg?.url) dish.image = storedDishImg.url;
+        }
+      }
+    }
 
     const usedCodes = await collectUsedServerLocalCodes(id);
     const requestedCode = normalizePinCode(body.localCode);

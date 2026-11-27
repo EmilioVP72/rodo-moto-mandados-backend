@@ -8,10 +8,24 @@ const FORBIDDEN_OBJECT_KEYS = new Set([
   'ridersList',
 ]);
 
+const MAX_HTTP_URL_LENGTH = 4096;
+const MAX_DATA_IMAGE_LENGTH = 6 * 1024 * 1024; // ~4.5 MB binario en data:image base64
+
+export function normalizeUrlCandidate(value: unknown): unknown {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (trimmed === '') return '';
+  if (/^(www\.|maps\.google\.|maps\.app\.goo\.gl\/|goo\.gl\/maps\/)/i.test(trimmed)) {
+    return `https://${trimmed}`;
+  }
+  return trimmed;
+}
+
 /**
  * Valida que una URL de imagen o enlace externo use únicamente protocolos seguros:
  * - Rutas locales controladas (/uploads/... o /assets/..., sin traversal ni //)
- * - Imágenes raster en base64 (jpeg, jpg, png, webp; excluye svg/html)
+ * - Imágenes raster en base64 (jpeg, jpg, png, webp; excluye svg/html) hasta 6 MB
  * - Enlaces http:// o https:// bien formados
  * Rechaza estrictamente javascript:, vbscript:, data:text/html, data:image/svg+xml, file:, etc.
  */
@@ -19,20 +33,22 @@ export function isSafeHttpOrUploadUrl(value: unknown): boolean {
   if (value === undefined || value === null || value === '') return true;
   if (typeof value !== 'string') return false;
 
-  const trimmed = value.trim();
+  const trimmed = String(normalizeUrlCandidate(value) ?? '').trim();
   if (trimmed === '') return true;
-  if (trimmed.length > 4096) return false;
   // Bloquear caracteres de control ASCII que algunos navegadores ignoran antes del esquema
   if (/[\u0000-\u001F\u007F]/.test(trimmed)) return false;
+
+  if (/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(trimmed)) {
+    if (trimmed.length > MAX_DATA_IMAGE_LENGTH) return false;
+    return /^data:image\/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=\s]+$/i.test(trimmed);
+  }
+
+  if (trimmed.length > MAX_HTTP_URL_LENGTH) return false;
 
   if (trimmed.startsWith('/uploads/') || trimmed.startsWith('/assets/')) {
     if (trimmed.startsWith('//') || trimmed.includes('..') || trimmed.includes('\\')) {
       return false;
     }
-    return true;
-  }
-
-  if (/^data:image\/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=]+$/i.test(trimmed)) {
     return true;
   }
 
@@ -59,14 +75,19 @@ export function stripDangerousKeysDeep<T>(input: T, depth = 0): T {
   return clean as T;
 }
 
-const safeOptionalUrlSchema = z
-  .string()
-  .trim()
-  .max(4096)
-  .refine((val) => isSafeHttpOrUploadUrl(val), {
-    message: 'URL no permitida. Solo se aceptan enlaces https://, http:// o rutas /uploads/.',
-  })
-  .optional();
+const nullToUndefined = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess((val) => (val === null ? undefined : val), schema.optional());
+
+const safeOptionalUrlSchema = z.preprocess(
+  (val) => normalizeUrlCandidate(val),
+  z
+    .string()
+    .max(MAX_DATA_IMAGE_LENGTH)
+    .refine((val) => isSafeHttpOrUploadUrl(val), {
+      message: 'URL no permitida. Solo se aceptan enlaces https://, http://, /uploads/ o imágenes JPG/PNG/WEBP.',
+    })
+    .optional()
+);
 
 const specialtyCategorySchema = z.object({
   id: z.string().trim().min(1).max(80),
@@ -88,7 +109,7 @@ const specialtyCategorySchema = z.object({
   iconUrl: safeOptionalUrlSchema,
   active: z.boolean(),
   order: z.number().finite().min(0).max(1000),
-  description: z.string().trim().max(300).optional(),
+  description: nullToUndefined(z.string().trim().max(300)),
 });
 
 const coverageZoneSchema = z.object({
@@ -97,8 +118,8 @@ const coverageZoneSchema = z.object({
   active: z.boolean(),
   radiusKm: z.number().finite().min(0).max(200),
   referenceStreet: z.string().trim().max(200),
-  centerLat: z.number().finite().min(-90).max(90).optional(),
-  centerLng: z.number().finite().min(-180).max(180).optional(),
+  centerLat: nullToUndefined(z.number().finite().min(-90).max(90)),
+  centerLng: nullToUndefined(z.number().finite().min(-180).max(180)),
 });
 
 const coordinateSchema = z.object({
@@ -154,136 +175,172 @@ export const dispatchSettingsUpdateSchema = z
 const productCustomizationSchema = z.object({
   id: z.string().trim().min(1).max(100),
   name: z.string().trim().min(1).max(120),
-  price: z.number().finite().min(0).max(10000),
+  price: z.coerce.number().finite().min(0).max(10000),
   type: z.enum(['removal', 'extra']),
 });
 
 const menuItemOptionGroupSchema = z.object({
   id: z.string().trim().min(1).max(100),
-  name: z.string().trim().min(1).max(120),
-  required: z.boolean().optional(),
-  minSelect: z.number().int().min(0).max(50).optional(),
-  maxSelect: z.number().int().min(0).max(50),
-  hasLimit: z.boolean().optional(),
-  allowRepeat: z.boolean().optional(),
-  options: z.array(z.string().trim().min(1).max(120)).min(1).max(60),
+  name: z.string().trim().min(1).max(160),
+  required: nullToUndefined(z.boolean()),
+  minSelect: nullToUndefined(z.coerce.number().int().min(0).max(200)),
+  maxSelect: z.coerce.number().int().min(0).max(200).default(1),
+  hasLimit: nullToUndefined(z.boolean()),
+  allowRepeat: nullToUndefined(z.boolean()),
+  options: z
+    .array(z.string().trim().min(1).max(160))
+    .min(1, 'Cada grupo de especificación debe tener al menos una opción.')
+    .max(100),
 });
 
 const comboSideOptionSchema = z.object({
   id: z.string().trim().min(1).max(100),
   name: z.string().trim().min(1).max(120),
-  description: z.string().trim().max(300).optional(),
+  description: nullToUndefined(z.string().trim().max(400)),
   image: safeOptionalUrlSchema.default(''),
-  priceExtra: z.number().finite().min(0).max(10000).optional(),
+  priceExtra: nullToUndefined(z.coerce.number().finite().min(0).max(10000)),
 });
 
 const comboMainDishOptionSchema = z.object({
   id: z.string().trim().min(1).max(100),
   name: z.string().trim().min(1).max(120),
-  description: z.string().trim().max(300).optional(),
+  description: nullToUndefined(z.string().trim().max(400)),
   image: safeOptionalUrlSchema.default(''),
-  priceExtra: z.number().finite().min(0).max(10000).optional(),
-  isSpicy: z.boolean().optional(),
+  priceExtra: nullToUndefined(z.coerce.number().finite().min(0).max(10000)),
+  isSpicy: nullToUndefined(z.boolean()),
 });
 
 const comboBuilderConfigSchema = z.object({
-  maxGuisados: z.number().int().min(1).max(10),
-  allowDuplicateGuisados: z.boolean().optional(),
+  maxGuisados: z.coerce.number().int().min(1).max(10),
+  allowDuplicateGuisados: nullToUndefined(z.boolean()),
   sideOptions: z.array(comboSideOptionSchema).max(40),
   mainDishOptions: z.array(comboMainDishOptionSchema).max(80),
 });
 
 const menuItemSchema = z.object({
   id: z.string().trim().min(1).max(120),
-  name: z.string().trim().min(1).max(160),
-  description: z.string().trim().max(600).default(''),
-  price: z.number().finite().min(0).max(50000),
-  originalPrice: z.number().finite().min(0).max(50000).optional(),
-  surcharge: z.number().finite().min(0).max(10000).optional(),
+  name: z.string().trim().min(1).max(180),
+  description: z.preprocess((v) => (v == null ? '' : v), z.string().trim().max(1200)),
+  price: z.coerce.number().finite().min(0).max(50000),
+  originalPrice: nullToUndefined(z.coerce.number().finite().min(0).max(50000)),
+  surcharge: nullToUndefined(z.coerce.number().finite().min(0).max(10000)),
   image: safeOptionalUrlSchema,
-  category: z.string().trim().max(100).optional(),
-  isAvailable: z.boolean().optional(),
-  stockLevel: z.number().int().min(0).max(100000).optional(),
-  optionGroups: z.array(menuItemOptionGroupSchema).max(20).optional(),
-  customizations: z.array(productCustomizationSchema).max(40).optional(),
-  isComboBuilder: z.boolean().optional(),
-  comboConfig: comboBuilderConfigSchema.optional(),
+  category: nullToUndefined(z.string().trim().max(120)),
+  isAvailable: nullToUndefined(z.boolean()),
+  stockLevel: nullToUndefined(z.coerce.number().finite().min(0).max(100000)),
+  optionGroups: nullToUndefined(z.array(menuItemOptionGroupSchema).max(30)),
+  customizations: nullToUndefined(z.array(productCustomizationSchema).max(60)),
+  isComboBuilder: nullToUndefined(z.boolean()),
+  comboConfig: nullToUndefined(comboBuilderConfigSchema),
 });
 
 const localAddressSchema = z.object({
-  calle: z.string().trim().max(200).default('Centro'),
-  numero: z.string().trim().max(60).default('S/N'),
-  colonia: z.string().trim().max(160).default('Centro'),
-  referencias: z.string().trim().max(400).optional(),
-  lat: z.number().finite().min(-90).max(90).optional(),
-  lng: z.number().finite().min(-180).max(180).optional(),
+  calle: z.preprocess((v) => (v == null ? 'Centro' : v), z.string().trim().max(240)),
+  numero: z.preprocess((v) => (v == null ? 'S/N' : v), z.string().trim().max(80)),
+  colonia: z.preprocess((v) => (v == null ? 'Centro' : v), z.string().trim().max(180)),
+  referencias: nullToUndefined(z.string().trim().max(500)),
+  lat: nullToUndefined(z.coerce.number().finite().min(-90).max(90)),
+  lng: nullToUndefined(z.coerce.number().finite().min(-180).max(180)),
   mapsUrl: safeOptionalUrlSchema,
 });
 
+function normalizeHHMM(val: unknown, fallback: string): string {
+  if (typeof val !== 'string') return fallback;
+  const trimmed = val.trim();
+  const match = /^([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?$/.exec(trimmed);
+  if (match) return `${match[1]}:${match[2]}`;
+  return trimmed || fallback;
+}
+
+const customServiceHoursSchema = z
+  .object({
+    open: z.preprocess((v) => normalizeHHMM(v, '09:00'), z.string().max(16)),
+    close: z.preprocess((v) => normalizeHHMM(v, '21:00'), z.string().max(16)),
+    enabled: z.boolean().default(false),
+  })
+  .superRefine((hours, ctx) => {
+    if (!hours.enabled) return;
+    const hhmm = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+    if (!hhmm.test(hours.open)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['open'],
+        message: 'La hora de apertura debe tener formato HH:MM.',
+      });
+    }
+    if (!hhmm.test(hours.close)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['close'],
+        message: 'La hora de cierre debe tener formato HH:MM.',
+      });
+    }
+    if (hhmm.test(hours.open) && hhmm.test(hours.close) && hours.open === hours.close) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['close'],
+        message: 'La hora de apertura y cierre deben ser distintas.',
+      });
+    }
+  });
+
 export const restaurantUpsertSchema = z
   .object({
-    id: z.string().trim().min(1).max(120).optional(),
-    name: z.string().trim().min(1, 'El nombre del establecimiento es obligatorio.').max(160),
+    id: nullToUndefined(z.string().trim().min(1).max(120)),
+    name: z.string().trim().min(1, 'El nombre del establecimiento es obligatorio.').max(180),
     establishmentType: z.enum(['restaurante', 'motomandado']).default('restaurante'),
-    category: z.string().trim().min(1).max(100).default('General'),
-    rating: z.string().trim().max(20).default('4.8'),
-    reviews: z.string().trim().max(40).default('Nuevo'),
-    time: z.string().trim().max(60).default('25-35 min'),
-    priceRange: z.enum(['$', '$$', '$$$', '$$$$']).optional(),
-    schedule: z.string().trim().max(120).optional(),
-    deliveryFee: z.number().finite().min(0).max(2000).default(35),
-    commissionRate: z.number().finite().min(0).max(100).default(15),
+    category: z.preprocess((v) => (v == null || v === '' ? 'General' : v), z.string().trim().max(120)),
+    rating: z.preprocess((v) => (v == null || v === '' ? '4.8' : String(v)), z.string().trim().max(30)),
+    reviews: z.preprocess((v) => (v == null || v === '' ? 'Nuevo' : String(v)), z.string().trim().max(60)),
+    time: z.preprocess((v) => (v == null || v === '' ? '25-35 min' : String(v)), z.string().trim().max(80)),
+    priceRange: nullToUndefined(z.enum(['$', '$$', '$$$', '$$$$'])),
+    schedule: nullToUndefined(z.string().trim().max(180)),
+    deliveryFee: z.coerce.number().finite().min(0).max(2000).default(35),
+    commissionRate: z.coerce.number().finite().min(0).max(100).default(15),
     acceptsTransfer: z.boolean().default(true),
     acceptsCash: z.boolean().default(true),
-    bankDetails: z.string().trim().max(300).optional(),
+    bankDetails: nullToUndefined(z.string().trim().max(500)),
     image: safeOptionalUrlSchema.default(''),
-    tags: z.array(z.string().trim().max(60)).max(30).default([]),
-    badge: z.string().trim().max(100).optional(),
-    description: z.string().trim().max(800).default(''),
+    tags: z.preprocess((v) => (Array.isArray(v) ? v : []), z.array(z.string().trim().max(80)).max(40)),
+    badge: nullToUndefined(z.string().trim().max(140)),
+    description: z.preprocess((v) => (v == null ? '' : v), z.string().trim().max(2000)),
     isActive: z.boolean().default(true),
     isOpen: z.boolean().default(true),
-    workingDays: z.array(z.number().int().min(0).max(6)).min(1).max(7).optional(),
-    closureReason: z.string().trim().max(300).optional(),
-    isPopular: z.boolean().optional(),
-    popularityRank: z.number().int().min(0).max(10000).optional(),
-    orderCount: z.number().int().min(0).max(10000000).optional(),
-    suggestedExtras: z.array(menuItemSchema).max(40).optional(),
-    promoActive: z.boolean().optional(),
-    promoLabel: z.string().trim().max(120).optional(),
-    promoDiscountPercent: z.number().finite().min(0).max(100).optional(),
-    hasFixedMenu: z.boolean().optional(),
-    customOrderHint: z.string().trim().max(400).optional(),
-    prepTimeMinutes: z.number().int().min(0).max(600).optional(),
-    address: localAddressSchema.optional(),
-    coordinates: coordinateSchema.optional(),
+    workingDays: nullToUndefined(z.array(z.coerce.number().int().min(0).max(6)).min(0).max(7)),
+    closureReason: nullToUndefined(z.string().trim().max(500)),
+    isPopular: nullToUndefined(z.boolean()),
+    popularityRank: nullToUndefined(z.coerce.number().int().min(0).max(10000)),
+    orderCount: nullToUndefined(z.coerce.number().int().min(0).max(10000000)),
+    suggestedExtras: nullToUndefined(z.array(menuItemSchema).max(60)),
+    promoActive: nullToUndefined(z.boolean()),
+    promoLabel: nullToUndefined(z.string().trim().max(180)),
+    promoDiscountPercent: nullToUndefined(z.coerce.number().finite().min(0).max(100)),
+    hasFixedMenu: nullToUndefined(z.boolean()),
+    customOrderHint: nullToUndefined(z.string().trim().max(600)),
+    prepTimeMinutes: nullToUndefined(z.coerce.number().int().min(0).max(600)),
+    address: nullToUndefined(localAddressSchema),
+    coordinates: nullToUndefined(coordinateSchema),
     mapsUrl: safeOptionalUrlSchema,
-    markupPercent: z.number().finite().min(0).max(100).optional(),
-    markupFixed: z.number().finite().min(0).max(5000).optional(),
-    customServiceHours: z
-      .object({
-        open: z.string().trim().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'La hora de apertura debe tener formato HH:MM.'),
-        close: z.string().trim().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'La hora de cierre debe tener formato HH:MM.'),
-        enabled: z.boolean(),
-      })
-      .refine((hours) => !hours.enabled || hours.open !== hours.close, 'La apertura y el cierre deben ser diferentes.')
-      .optional(),
-    localCode: z.string().trim().max(10).optional(),
-    phone: z.string().trim().max(30).optional(),
-    contactPerson: z.string().trim().max(120).nullable().optional(),
-    menu: z.array(menuItemSchema).max(500).default([]),
+    markupPercent: nullToUndefined(z.coerce.number().finite().min(0).max(100)),
+    markupFixed: nullToUndefined(z.coerce.number().finite().min(0).max(5000)),
+    customServiceHours: nullToUndefined(customServiceHoursSchema),
+    localCode: nullToUndefined(z.string().trim().max(20)),
+    phone: nullToUndefined(z.string().trim().max(40)),
+    contactPerson: z.string().trim().max(160).nullable().optional(),
+    menu: z.preprocess((v) => (Array.isArray(v) ? v : []), z.array(menuItemSchema).max(500)),
   })
   .strip();
 
 export const partnerLocalUpsertSchema = z
   .object({
-    id: z.string().trim().min(1).max(120).optional(),
+    id: nullToUndefined(z.string().trim().min(1).max(120)),
     code: z.string().trim().regex(/^\d{3,4}$/, 'El código de local debe tener 3 o 4 dígitos numéricos.'),
-    name: z.string().trim().min(1, 'El nombre del local es obligatorio.').max(160),
-    phone: z.string().trim().max(30).default(''),
-    serviceFee: z.number().finite().min(0).max(2000).default(35),
+    name: z.string().trim().min(1, 'El nombre del local es obligatorio.').max(180),
+    phone: z.preprocess((v) => (v == null ? '' : String(v)), z.string().trim().max(40)),
+    serviceFee: z.coerce.number().finite().min(0).max(2000).default(35),
     address: localAddressSchema.default({ calle: 'Centro', numero: 'S/N', colonia: 'Centro' }),
-    contactPerson: z.string().trim().max(120).nullable().optional(),
-    notes: z.string().trim().max(500).nullable().optional(),
+    contactPerson: z.string().trim().max(160).nullable().optional(),
+    notes: z.string().trim().max(800).nullable().optional(),
     isActive: z.boolean().default(true),
   })
   .strip();
@@ -316,9 +373,10 @@ export function validateRestaurantPayload(raw: unknown):
   const parsed = restaurantUpsertSchema.safeParse(stripped);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
+    const pathLabel = issue?.path?.length ? ` (${issue.path.join('.')})` : '';
     return {
       success: false,
-      error: issue?.message || 'Datos del restaurante inválidos o con enlaces no permitidos.',
+      error: `${issue?.message || 'Datos del restaurante inválidos.'}${pathLabel}`,
     };
   }
   return { success: true, data: parsed.data };
