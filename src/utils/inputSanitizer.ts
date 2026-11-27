@@ -161,8 +161,12 @@ const productCustomizationSchema = z.object({
 const menuItemOptionGroupSchema = z.object({
   id: z.string().trim().min(1).max(100),
   name: z.string().trim().min(1).max(120),
-  maxSelect: z.number().int().min(1).max(50),
-  options: z.array(z.string().trim().min(1).max(120)).max(50),
+  required: z.boolean().optional(),
+  minSelect: z.number().int().min(0).max(50).optional(),
+  maxSelect: z.number().int().min(0).max(50),
+  hasLimit: z.boolean().optional(),
+  allowRepeat: z.boolean().optional(),
+  options: z.array(z.string().trim().min(1).max(120)).min(1).max(60),
 });
 
 const comboSideOptionSchema = z.object({

@@ -1,13 +1,26 @@
 // Catalog values and route fees are loaded by the server. The order supplies selections only.
 type Selection = { id: string; name: string; price?: number; type?: string; priceExtra?: number };
+type OptionGroupSpec = {
+  id: string;
+  name: string;
+  required?: boolean;
+  minSelect?: number;
+  maxSelect: number;
+  hasLimit?: boolean;
+  allowRepeat?: boolean;
+  options: string[];
+};
 type Product = {
   id: string; name: string; price: number; surcharge?: number; isAvailable?: boolean; stockLevel?: number;
   customizations?: Selection[];
+  optionGroups?: OptionGroupSpec[];
   isComboBuilder?: boolean;
   comboConfig?: { sideOptions?: Selection[]; mainDishOptions?: Selection[]; maxGuisados?: number };
 };
 type Item = {
   id: string; quantity: number; notes?: string; selectedModifiers?: { id: string }[];
+  selectedOptions?: string[];
+  selectedOptionGroups?: { groupId: string; groupName?: string; selections: { option: string; quantity: number }[] }[];
   comboDetails?: { sideName: string; mainDishes: { name: string; quantity: number }[] };
   customizations?: string[];
 };
@@ -46,8 +59,38 @@ function linePrice(line: Item, products: Map<string, Product>) {
     if (!modifier) throw new PriceError('Un modificador ya no está disponible.');
     if (modifier.type === 'extra') extra += money(modifier.price ?? 0);
   }
+  if (product.optionGroups?.length) {
+    const submittedList = Array.isArray(line.selectedOptionGroups) ? line.selectedOptionGroups : [];
+    const submittedByGroup = new Map(submittedList.map(g => [g.groupId, g.selections || []]));
+    for (const grp of product.optionGroups) {
+      const hasLimit = grp.hasLimit !== false && (grp.maxSelect ?? 1) > 0;
+      const maxSel = hasLimit ? Math.max(1, Math.floor(grp.maxSelect || 1)) : Infinity;
+      const minSel = typeof grp.minSelect === 'number'
+        ? Math.max(0, Math.min(Math.floor(grp.minSelect), maxSel))
+        : grp.required === false ? 0 : 1;
+      const picks = submittedByGroup.get(grp.id) || [];
+      let totalPicked = 0;
+      const seen = new Set<string>();
+      for (const pick of picks) {
+        if (!grp.options.includes(pick.option)) throw new PriceError(`Opción inválida en "${grp.name}".`);
+        const pickQty = quantity(pick.quantity, 50);
+        if ((!grp.allowRepeat || maxSel === 1) && (pickQty > 1 || seen.has(pick.option))) {
+          throw new PriceError(`No se permite repetir opciones en "${grp.name}".`);
+        }
+        seen.add(pick.option);
+        totalPicked += pickQty;
+      }
+      if (totalPicked < minSel) throw new PriceError(`Completa la selección obligatoria en "${grp.name}".`);
+      if (hasLimit && totalPicked > maxSel) throw new PriceError(`Excediste el límite de opciones en "${grp.name}" (máx. ${maxSel}).`);
+    }
+  }
   const combo = line.comboDetails;
-  if ((product.isComboBuilder || product.comboConfig || product.name.toLowerCase().includes('guisado')) && !combo) {
+  const requiresLegacyCombo = Boolean(
+    product.isComboBuilder ||
+    product.comboConfig ||
+    (!product.optionGroups?.length && product.name.toLowerCase().includes('guisado'))
+  );
+  if (requiresLegacyCombo && !combo) {
     throw new PriceError('Selecciona la guarnición y los guisados.');
   }
   if (combo) {

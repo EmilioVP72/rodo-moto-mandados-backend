@@ -362,4 +362,79 @@ describe('Token exclusivo de repartidor y estatus de pedidos de restaurante', ()
     const badLocal = validatePartnerLocalPayload({ name: 'Local X', code: 'abc' });
     assert.equal(badLocal.success, false);
   });
+
+  it('valida especificaciones de platillos (optionGroups con o sin límite) en priceFoodOrder', () => {
+    const customCatalog = {
+      deliveryFee: 35,
+      commissionRate: 15,
+      promoPercent: 0,
+      menu: [
+        {
+          id: 'china-2g',
+          name: 'Paquete 2 Guisados Especial',
+          price: 130,
+          optionGroups: [
+            { id: 'base', name: 'Base', required: true, hasLimit: true, minSelect: 1, maxSelect: 1, options: ['Arroz', 'Pasta'] },
+            { id: 'guis', name: 'Guisados', required: true, hasLimit: true, minSelect: 2, maxSelect: 2, allowRepeat: true, options: ['Pollo Naranja', 'Res Brócoli'] },
+          ],
+        },
+        {
+          id: 'alitas-gde',
+          name: 'Alitas Grandes 12 pzs',
+          price: 165,
+          optionGroups: [
+            { id: 'salsas', name: 'Salsas', required: true, hasLimit: true, minSelect: 1, maxSelect: 2, options: ['BBQ', 'Buffalo', 'Mango Habanero'] },
+          ],
+        },
+      ],
+    };
+
+    // Falla si se omiten las especificaciones obligatorias
+    assert.throws(() =>
+      priceFoodOrder({ items: [{ id: 'china-2g', quantity: 1 }] }, customCatalog)
+    );
+
+    // Pasa con 1 base + 2 porciones repetidas del mismo guisado (sin exigir comboDetails legado)
+    const okChina = priceFoodOrder(
+      {
+        items: [
+          {
+            id: 'china-2g-1700000000000',
+            quantity: 1,
+            selectedOptionGroups: [
+              { groupId: 'base', selections: [{ option: 'Pasta', quantity: 1 }] },
+              { groupId: 'guis', selections: [{ option: 'Pollo Naranja', quantity: 2 }] },
+            ],
+          },
+        ],
+      },
+      customCatalog
+    );
+    assert.equal(okChina.subtotal, 130);
+
+    // Falla en alitas si envía 3 salsas cuando el límite máximo es 2
+    assert.throws(() =>
+      priceFoodOrder(
+        {
+          items: [
+            {
+              id: 'alitas-gde',
+              quantity: 1,
+              selectedOptionGroups: [
+                {
+                  groupId: 'salsas',
+                  selections: [
+                    { option: 'BBQ', quantity: 1 },
+                    { option: 'Buffalo', quantity: 1 },
+                    { option: 'Mango Habanero', quantity: 1 },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        customCatalog
+      )
+    );
+  });
 });
